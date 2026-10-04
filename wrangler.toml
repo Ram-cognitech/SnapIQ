@@ -6,6 +6,12 @@ compatibility_date = "2026-09-01"
 # account: D1 is a local SQLite file, R2 a local directory, and the Durable
 # Object runs in the same process. An account is needed to deploy, not to build.
 
+# The webapp and the capture page are served by this same Worker, from the same
+# origin as the API. That means no cross-origin dance for the phone, one thing
+# to deploy, and a single place where the app and its data agree.
+[assets]
+directory = "./public"
+
 [[d1_databases]]
 binding = "DB"
 database_name = "snapiq"

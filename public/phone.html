@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>SnapIQ</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#3b5bdb">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='14'>📄</text></svg>">
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#14161a; --muted:#5d636e; --line:#e3e6ea; --accent:#3b5bdb; --ok:#0b7a52; --bad:#b42318; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { --bg:#14161a; --card:#1c1f25; --ink:#f2f4f7; --muted:#99a0ad; --line:#2b2f37; --accent:#8aa2ff; --ok:#4ade9b; --bad:#ff8d7e; }
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin:0; background:var(--bg); color:var(--ink); min-height:100vh; padding:16px;
+    font:17px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    display:flex; flex-direction:column; justify-content:center; align-items:center;
+  }
+  main { width:100%; max-width:420px; text-align:center; }
+  h1 { font-size:1.35rem; margin:0 0 4px; }
+  .slogan { color:var(--muted); font-size:.9rem; margin:0 0 28px; }
+  button {
+    font:inherit; font-weight:700; border:0; border-radius:16px; width:100%;
+    min-height:76px; background:var(--accent); color:#fff; margin-bottom:12px;
+    display:flex; align-items:center; justify-content:center; gap:10px;
+    transition:transform .06s; cursor:pointer;
+  }
+  button:active { transform:scale(.985); }
+  button.second { background:var(--card); color:var(--ink); border:2px solid var(--line); }
+  button.small { min-height:52px; font-size:.95rem; border-radius:12px; }
+  button:disabled { opacity:.55; }
+  .note { border-radius:14px; padding:14px; margin-bottom:18px; font-weight:600; }
+  .note.ok { background:color-mix(in srgb, var(--ok) 12%, transparent); color:var(--ok); }
+  .note.bad { background:color-mix(in srgb, var(--bad) 12%, transparent); color:var(--bad); }
+  .muted { color:var(--muted); font-size:.85rem; }
+  .pages { display:flex; gap:8px; justify-content:center; flex-wrap:wrap; margin:0 0 18px; }
+  .pages img { width:62px; height:80px; object-fit:cover; border-radius:8px; border:1px solid var(--line); }
+  .hidden { display:none !important; }
+  svg { width:26px; height:26px; fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }
+</style>
+</head>
+<body>
+<main>
+  <h1>SnapIQ</h1>
+  <p class="slogan">Snap it. Perfect it. Use it anywhere!</p>
+
+  <div id="note" class="note hidden"></div>
+
+  <!-- Not paired, and no code to pair with. -->
+  <section id="unpaired" class="hidden">
+    <p>This phone is not linked to SnapIQ yet.</p>
+    <p class="muted">On your computer, open SnapIQ and press <strong>Scan with my phone</strong>, then point your camera at the code it shows.</p>
+  </section>
+
+  <section id="ready" class="hidden">
+    <div id="pages" class="pages"></div>
+
+    <button id="take">
+      <svg viewBox="0 0 24 24"><path d="M3 8a2 2 0 0 1 2-2h2l1.5-2h7L17 6h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><circle cx="12" cy="12.5" r="3.5"/></svg>
+      <span id="take-label">Take a photo</span>
+    </button>
+    <button id="choose" class="second">
+      <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m3 15 5-4 4 3 3-2 6 5"/></svg>
+      Choose a photo
+    </button>
+    <button id="done" class="second small hidden">Done — send to my computer</button>
+
+    <p id="hint" class="muted">It will appear on your computer straight away.</p>
+  </section>
+
+  <input id="camera" type="file" accept="image/*" capture="environment" class="hidden">
+  <input id="gallery" type="file" accept="image/*" class="hidden">
+</main>
+
+<script type="module">
+// The phone side. Pairs once from the QR, then sends pages.
+//
+// The page is resized here rather than on the server: a Worker has 10 ms of
+// CPU on the free plan, and doing it here means the phone's own camera data
+// never leaves the device inside the file either, since re-drawing through a
+// canvas drops the metadata with it.
+//
+// Cropping and straightening are the next piece of work; today this sends a
+// resized, metadata-free photo.
+
+const LONG_EDGE = 3500;          // 300 DPI on A4, docs/api.md section 7
+const QUALITY = 0.85;
+
+const $ = (id) => document.getElementById(id);
+const params = new URLSearchParams(location.search);
+
+let deviceKey = null;
+try { deviceKey = localStorage.getItem('snapiq.device'); } catch { /* private window */ }
+let channelId = params.get('c') || null;
+let scanId = null;
+let pageCount = 0;
+
+const say = (text, kind = 'ok') => {
+  const note = $('note');
+  note.textContent = text;
+  note.className = `note ${kind}`;
+};
+const clearSay = () => $('note').classList.add('hidden');
+
+const api = async (path, { method = 'GET', body, token = deviceKey } = {}) => {
+  const response = await fetch(path, {
+    method,
+    headers: {
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+      ...(body ? { 'content-type': 'application/json' } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  let parsed = null;
+  try { parsed = await response.json(); } catch {}
+  return { status: response.status, body: parsed };
+};
+
+// --- pairing, once --------------------------------------------------------
+
+async function pair(claimToken) {
+  const label = /iPhone|iPad/.test(navigator.userAgent) ? 'iPhone'
+    : /Android/.test(navigator.userAgent) ? 'Android phone' : 'a phone';
+  const { status, body } = await api('/v1/devices/claim', {
+    method: 'POST', token: null, body: { claim_token: claimToken, label },
+  });
+  if (status === 201) {
+    deviceKey = body.device_key;
+    try { localStorage.setItem('snapiq.device', deviceKey); } catch {}
+    // Take the code out of the address bar: it is single-use and spent now.
+    history.replaceState(null, '', channelId ? `/phone?c=${encodeURIComponent(channelId)}` : '/phone');
+    say('This phone is linked. You only do this once.');
+    return true;
+  }
+  if (status === 410) say('That code has already been used. Ask your computer for a new one.', 'bad');
+  else say('That code did not work. Ask your computer for a new one.', 'bad');
+  return false;
+}
+
+// --- sending a page -------------------------------------------------------
+
+// Draw the photo through a canvas at the size a document actually needs.
+// Anything beyond 300 DPI on the page is paper grain, and a 48 megapixel
+// frame would be refused by the API anyway.
+async function prepare(file) {
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, LONG_EDGE / Math.max(bitmap.width, bitmap.height));
+  const width = Math.round(bitmap.width * scale);
+  const height = Math.round(bitmap.height * scale);
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext('2d', { alpha: false });
+  context.drawImage(bitmap, 0, 0, width, height);
+  bitmap.close?.();
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', QUALITY));
+  return blob;
+}
+
+const hex = (buffer) => [...new Uint8Array(buffer)].map((b) => b.toString(16).padStart(2, '0')).join('');
+
+async function send(file) {
+  if (!file) return;
+  busy(true);
+  clearSay();
+  try {
+    const blob = await prepare(file);
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    const digest = hex(await crypto.subtle.digest('SHA-256', bytes));
+
+    if (!scanId) {
+      const started = await api('/v1/scans', {
+        method: 'POST',
+        body: { channel_id: channelId, idempotency_key: crypto.randomUUID() },
+      });
+      if (started.status === 401) return unlink();
+      if (started.status !== 201) throw new Error(started.body?.detail ?? 'could not start');
+      scanId = started.body.scan_id;
+    }
+
+    const asked = await api(`/v1/scans/${scanId}/pages`, {
+      method: 'POST',
+      body: { bytes: bytes.length, content_type: 'image/jpeg', sha256: digest, idempotency_key: crypto.randomUUID() },
+    });
+    if (asked.status !== 201) throw new Error(asked.body?.detail ?? 'could not add a page');
+
+    const put = await fetch(asked.body.upload_url, { method: 'PUT', headers: { 'content-type': 'image/jpeg' }, body: bytes });
+    if (!put.ok) throw new Error('the upload did not go through');
+
+    const committed = await api(`/v1/scans/${scanId}/pages/${asked.body.page_id}/commit`, {
+      method: 'POST', body: { sha256: digest },
+    });
+    if (committed.status !== 200) throw new Error(committed.body?.detail ?? 'the page did not arrive whole');
+
+    pageCount = committed.body.page_count;
+    addThumb(blob);
+    say(pageCount === 1 ? 'Sent. It is on your computer.' : `${pageCount} pages sent.`);
+    $('take-label').textContent = 'Take another page';
+    $('done').classList.remove('hidden');
+    $('hint').textContent = 'Add more pages, or press Done when the document is complete.';
+  } catch (error) {
+    say(error.message || 'That did not work. Try again.', 'bad');
+  } finally {
+    busy(false);
+  }
+}
+
+async function finish() {
+  if (!scanId) return;
+  busy(true);
+  const closed = await api(`/v1/scans/${scanId}/close`, { method: 'POST', body: {} });
+  busy(false);
+  if (closed.status !== 200) return say('Could not finish the document.', 'bad');
+  say(`Done — ${closed.body.page_count} page${closed.body.page_count === 1 ? '' : 's'} on your computer.`);
+  scanId = null;
+  pageCount = 0;
+  $('pages').replaceChildren();
+  $('take-label').textContent = 'Take a photo';
+  $('done').classList.add('hidden');
+  $('hint').textContent = 'It will appear on your computer straight away.';
+}
+
+function addThumb(blob) {
+  const img = document.createElement('img');
+  img.src = URL.createObjectURL(blob);
+  img.alt = '';
+  $('pages').append(img);
+}
+
+function busy(on) {
+  for (const id of ['take', 'choose', 'done']) $(id).disabled = on;
+  if (on) $('take-label').textContent = 'Sending…';
+}
+
+function unlink() {
+  deviceKey = null;
+  try { localStorage.removeItem('snapiq.device'); } catch {}
+  show();
+  say('This phone was unlinked. Scan a new code from your computer.', 'bad');
+}
+
+function show() {
+  $('ready').classList.toggle('hidden', !deviceKey);
+  $('unpaired').classList.toggle('hidden', Boolean(deviceKey));
+}
+
+// --- wiring ---------------------------------------------------------------
+
+$('take').onclick = () => $('camera').click();
+$('choose').onclick = () => $('gallery').click();
+$('done').onclick = finish;
+for (const id of ['camera', 'gallery']) {
+  $(id).onchange = (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    send(file);
+  };
+}
+
+const claim = params.get('t');
+if (claim && !deviceKey) await pair(claim);
+else if (claim) history.replaceState(null, '', channelId ? `/phone?c=${encodeURIComponent(channelId)}` : '/phone');
+show();
+</script>
+</body>
+</html>

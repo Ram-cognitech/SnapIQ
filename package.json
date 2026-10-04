@@ -9,7 +9,9 @@
     "migrate": "wrangler d1 migrations apply snapiq --local",
     "test": "vitest run",
     "test:local": "node scripts/test-local.mjs",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "dev:lan": "wrangler dev --ip 0.0.0.0",
+    "icons": "node scripts/icons.mjs"
   },
   "devDependencies": {
     "vitest": "^5.0.3",

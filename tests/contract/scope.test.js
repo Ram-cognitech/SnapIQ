@@ -114,9 +114,14 @@ describe('credentials never come back out', () => {
 
 describe('a wrong address says so', () => {
   it('answers the root without credentials, instead of demanding a sign-in', async () => {
+    // The root is the app itself now, served as a static asset; what matters
+    // here is that it answers rather than asking for a credential.
     const root = await api('/');
     expect(root.status).toBe(200);
-    expect(root.body.name).toBe('SnapIQ');
+
+    const health = await api('/health');
+    expect(health.status).toBe(200);
+    expect(health.body.name).toBe('SnapIQ');
   });
 
   it('calls an unknown address missing rather than unauthenticated', async () => {

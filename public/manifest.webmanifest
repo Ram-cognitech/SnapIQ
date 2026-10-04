@@ -1,0 +1,16 @@
+{
+  "name": "SnapIQ",
+  "short_name": "SnapIQ",
+  "description": "Scan a document with your phone; it lands on the computer in front of you.",
+  "start_url": "/phone",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#14161a",
+  "theme_color": "#3b5bdb",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

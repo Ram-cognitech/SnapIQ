@@ -109,7 +109,7 @@ async function route(request, env, url, path, requestId) {
     const expiresAt = plusSeconds(600);
     const id = await store.createPairing({ accountId: caller.account_id, claimHash: await sha256Hex(claimToken), expiresAt });
     return json(
-      { pairing_id: id, claim_token: claimToken, qr_url: `${url.origin}/pair?t=${claimToken}`, expires_at: expiresAt },
+      { pairing_id: id, claim_token: claimToken, qr_url: `${url.origin}/phone?t=${claimToken}`, expires_at: expiresAt },
       201
     );
   }

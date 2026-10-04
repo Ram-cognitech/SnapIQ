@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SnapIQ</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='14'>📄</text></svg>">
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #fff; --ink: #14161a; --muted: #5d636e;
+    --line: #e3e6ea; --accent: #3b5bdb; --ok: #0b7a52; --bad: #b42318;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #14161a; --card: #1c1f25; --ink: #f2f4f7; --muted: #99a0ad;
+      --line: #2b2f37; --accent: #8aa2ff; --ok: #4ade9b; --bad: #ff8d7e;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink); min-height: 100vh;
+    font: 16px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: flex; flex-direction: column; align-items: center; padding: 16px;
+  }
+  main { width: 100%; max-width: 760px; }
+  h1 { font-size: 1.45rem; margin: 24px 0 2px; letter-spacing: -0.01em; }
+  .slogan { color: var(--muted); margin: 0 0 24px; font-size: .95rem; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    padding: 20px; margin-bottom: 16px;
+  }
+  button {
+    font: inherit; font-weight: 600; border: 0; border-radius: 10px; padding: 11px 18px;
+    background: var(--accent); color: #fff; cursor: pointer;
+  }
+  button.quiet { background: transparent; color: var(--accent); border: 1px solid var(--line); }
+  button:disabled { opacity: .5; cursor: default; }
+  input[type=password] {
+    font: inherit; padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px;
+    background: var(--bg); color: var(--ink); width: 100%; max-width: 280px;
+  }
+  label { display: block; font-weight: 600; margin-bottom: 6px; font-size: .9rem; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .qr { background: #fff; padding: 12px; border-radius: 12px; display: inline-block; line-height: 0; }
+  .qr img { width: 220px; height: 220px; image-rendering: pixelated; }
+  .waiting { color: var(--accent); font-weight: 600; display: flex; gap: 8px; align-items: center; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: currentColor; animation: pulse 1.2s infinite; }
+  @keyframes pulse { 0%, 100% { opacity: .25 } 50% { opacity: 1 } }
+  .muted { color: var(--muted); font-size: .9rem; }
+  .err { color: var(--bad); font-weight: 600; }
+  .scans { display: grid; gap: 10px; }
+  .scan {
+    display: flex; gap: 12px; align-items: center; justify-content: space-between;
+    border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
+  }
+  .scan img { width: 54px; height: 54px; object-fit: cover; border-radius: 7px; background: var(--bg); }
+  .scan .meta { flex: 1; min-width: 0; }
+  .scan .when { color: var(--muted); font-size: .85rem; }
+  a { color: var(--accent); }
+  code { background: var(--bg); padding: 2px 5px; border-radius: 5px; font-size: .85em; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>SnapIQ</h1>
+  <p class="slogan">Snap it. Perfect it. Use it anywhere!</p>
+
+  <!-- Signing in: one operator, one passphrase. There is no second user for a
+       sign-up flow to serve yet (docs/plan.md section 0). -->
+  <section id="signin" class="card hidden">
+    <label for="passphrase">Passphrase</label>
+    <div class="row">
+      <input id="passphrase" type="password" autocomplete="current-password" placeholder="your passphrase">
+      <button id="signin-go">Sign in</button>
+    </div>
+    <p id="signin-error" class="err hidden"></p>
+  </section>
+
+  <section id="app" class="hidden">
+    <div class="card">
+      <div class="row" style="justify-content: space-between">
+        <div>
+          <strong>Scan with your phone</strong>
+          <p class="muted" style="margin:.25rem 0 0">A photo taken on your phone appears here, straight away.</p>
+        </div>
+        <div class="row">
+          <button id="start">Scan with my phone</button>
+          <button id="signout" class="quiet">Sign out</button>
+        </div>
+      </div>
+
+      <div id="waiting-area" class="hidden" style="margin-top:18px">
+        <div class="row" style="align-items:flex-start; gap:20px">
+          <div class="qr"><img id="qr" alt="Scan this with your phone's camera"></div>
+          <div>
+            <p class="waiting"><span class="dot"></span><span id="waiting-text">Waiting for your phone…</span></p>
+            <ol class="muted" style="padding-left:18px; margin:.5rem 0">
+              <li>Point your phone's camera at the code.</li>
+              <li>The first time, it will pair your phone — once, for good.</li>
+              <li>Take a photo of the page.</li>
+            </ol>
+            <p class="muted">Or open <code id="phone-link-text"></code> on a phone that is already paired.</p>
+            <button id="stop" class="quiet">Cancel</button>
+          </div>
+        </div>
+      </div>
+      <p id="local-note" class="muted hidden" style="margin-top:14px">
+        This page is on <code>localhost</code>, which means nothing to your phone. Use the
+        address of this machine on your network, or deploy it, for the code to work.
+      </p>
+    </div>
+
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <strong>Your scans</strong>
+        <button id="refresh" class="quiet">Refresh</button>
+      </div>
+      <p id="scans-empty" class="muted" style="margin:.6rem 0 0">Nothing here yet.</p>
+      <div id="scans" class="scans" style="margin-top:12px"></div>
+    </div>
+  </section>
+</main>
+
+<script type="module">
+// The desktop side. It opens a channel, shows its QR, and listens: when the
+// phone sends a page, the event arrives on the stream and the scan appears
+// without this page being reloaded.
+
+const $ = (id) => document.getElementById(id);
+const api = async (path, { method = 'GET', body, token } = {}) => {
+  const response = await fetch(path, {
+    method,
+    headers: {
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+      ...(body ? { 'content-type': 'application/json' } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  let parsed = null;
+  try { parsed = await response.json(); } catch { /* no body */ }
+  return { status: response.status, body: parsed };
+};
+
+let session = null;
+try { session = localStorage.getItem('snapiq.session'); } catch { /* private window */ }
+let channel = null;
+let stream = null;
+
+const show = (signedIn) => {
+  $('signin').classList.toggle('hidden', signedIn);
+  $('app').classList.toggle('hidden', !signedIn);
+};
+
+async function signIn() {
+  const passphrase = $('passphrase').value;
+  const { status, body } = await api('/v1/session', { method: 'POST', body: { passphrase } });
+  if (status !== 200) {
+    $('signin-error').textContent = 'That passphrase is not right.';
+    $('signin-error').classList.remove('hidden');
+    return;
+  }
+  session = body.token;
+  try { localStorage.setItem('snapiq.session', session); } catch { /* fine, this session only */ }
+  $('passphrase').value = '';
+  show(true);
+  loadScans();
+}
+
+function signOut() {
+  session = null;
+  try { localStorage.removeItem('snapiq.session'); } catch {}
+  stopWaiting();
+  show(false);
+}
+
+// --- waiting for the phone ------------------------------------------------
+
+async function start() {
+  const { status, body } = await api('/v1/channels', { method: 'POST', token: session, body: { label: 'desktop' } });
+  if (status === 401) return signOut();
+  if (status !== 201) return;
+
+  channel = body;
+
+  // The code carries both: which window is waiting, and - for a phone that has
+  // never been here - a single-use token to pair with. A phone that is already
+  // paired ignores the second half.
+  const pairing = await api('/v1/pairings', { method: 'POST', token: session, body: {} });
+  const link = new URL(
+    `/phone?c=${encodeURIComponent(body.channel_id)}`
+      + (pairing.status === 201 ? `&t=${encodeURIComponent(pairing.body.claim_token)}` : ''),
+    location.origin
+  ).toString();
+  $('phone-link-text').textContent = link.replace(/^https?:\/\//, '');
+  if (window.qrcode) {
+    const qr = window.qrcode(0, 'M');
+    qr.addData(link);
+    qr.make();
+    $('qr').src = qr.createDataURL(6, 2);
+  } else {
+    // Without the code image the link still works, typed in by hand.
+    $('qr').alt = link;
+  }
+
+  $('waiting-area').classList.remove('hidden');
+  $('start').disabled = true;
+  listen();
+}
+
+// Read the event stream with fetch rather than EventSource, because
+// EventSource cannot send an Authorization header - and the alternative,
+// putting the channel token in the query string, would write a credential
+// into every log and history entry that saw the URL.
+async function listen() {
+  const mine = channel;
+  stream = new AbortController();
+  try {
+    const response = await fetch(`/v1/channels/${mine.channel_id}/events`, {
+      headers: { authorization: `Bearer ${mine.channel_token}`, accept: 'text/event-stream' },
+      signal: stream.signal,
+    });
+    if (!response.ok || !response.body) return;
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let split;
+      while ((split = buffer.indexOf('\n\n')) !== -1) {
+        const frame = buffer.slice(0, split);
+        buffer = buffer.slice(split + 2);
+        const data = frame.split('\n').filter((l) => l.startsWith('data:')).map((l) => l.slice(5).trim()).join('');
+        if (data) onEvent(JSON.parse(data));
+      }
+    }
+  } catch { /* cancelled, or the window was closed */ }
+}
+
+function onEvent(event) {
+  if (event.event === 'page.added') {
+    $('waiting-text').textContent = event.page_count === 1
+      ? 'A page arrived. Waiting for more, or finish on the phone…'
+      : `${event.page_count} pages arrived…`;
+    loadScans();
+  }
+  if (event.event === 'scan.closed') {
+    $('waiting-text').textContent = 'Done.';
+    loadScans();
+    stopWaiting();
+  }
+}
+
+function stopWaiting() {
+  if (stream) { stream.abort(); stream = null; }
+  channel = null;
+  $('waiting-area').classList.add('hidden');
+  $('start').disabled = false;
+  $('waiting-text').textContent = 'Waiting for your phone…';
+}
+
+// --- the scans ------------------------------------------------------------
+
+async function loadScans() {
+  const { status, body } = await api('/v1/scans', { token: session });
+  if (status === 401) return signOut();
+  if (status !== 200) return;
+
+  const scans = body.scans ?? [];
+  $('scans-empty').classList.toggle('hidden', scans.length > 0);
+  $('scans').replaceChildren(...scans.map(render));
+}
+
+// Fetch a scan's bytes with the session header and wrap them as a blob URL,
+// which is what lets an <img> or a new tab show something the API only hands
+// over to an authenticated request.
+async function bytesOf(scanId, query) {
+  try {
+    const response = await fetch(`/v1/scans/${scanId}/content${query}`, {
+      headers: { authorization: `Bearer ${session}` },
+    });
+    if (!response.ok) return null;
+    return URL.createObjectURL(await response.blob());
+  } catch {
+    return null;
+  }
+}
+
+function render(scan) {
+  const row = document.createElement('div');
+  row.className = 'scan';
+
+  // An <img> cannot carry an Authorization header either, so the bytes are
+  // fetched and handed to the tag as a blob: no credential in a URL.
+  const thumb = document.createElement('img');
+  thumb.alt = '';
+  thumb.style.visibility = 'hidden';
+  bytesOf(scan.scan_id, '?page=1').then((url) => {
+    if (url) { thumb.src = url; thumb.style.visibility = 'visible'; }
+  });
+
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  const when = new Date(scan.created_at.replace(' ', 'T') + (scan.created_at.endsWith('Z') ? '' : 'Z'));
+  meta.innerHTML = `<div><strong>${scan.state === 'open' ? 'Scanning…' : 'Document'}</strong></div>`
+    + `<div class="when">${when.toLocaleString()}</div>`;
+
+  const open = document.createElement('button');
+  open.className = 'quiet';
+  open.textContent = 'Open';
+  open.onclick = async () => {
+    const url = await bytesOf(scan.scan_id, '');
+    if (url) window.open(url, '_blank');
+  };
+
+  const remove = document.createElement('button');
+  remove.className = 'quiet';
+  remove.textContent = 'Delete';
+  remove.onclick = async () => {
+    await api(`/v1/scans/${scan.scan_id}`, { method: 'DELETE', token: session });
+    loadScans();
+  };
+
+  const actions = document.createElement('div');
+  actions.className = 'row';
+  actions.append(open, remove);
+  row.append(thumb, meta, actions);
+  return row;
+}
+
+// --- wiring ---------------------------------------------------------------
+
+$('signin-go').onclick = signIn;
+$('passphrase').onkeydown = (e) => { if (e.key === 'Enter') signIn(); };
+$('signout').onclick = signOut;
+$('start').onclick = start;
+$('stop').onclick = stopWaiting;
+$('refresh').onclick = loadScans;
+
+if (/^(localhost|127\.|\[::1\])/.test(location.hostname)) $('local-note').classList.remove('hidden');
+
+show(Boolean(session));
+if (session) loadScans();
+</script>
+</body>
+</html>
