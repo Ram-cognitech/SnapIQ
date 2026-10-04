@@ -88,6 +88,12 @@ POST /v1/scans/{id}/pages                       (device_key)
 POST /v1/scans/{id}/pages/{page_id}/commit      (device_key)  { sha256 }
 → 200 { committed: true, page_count }                        # fires page.added
 
+POST /v1/scans/{id}/document                    (device_key)  { bytes, sha256, idempotency_key }
+→ 201 { upload_url, upload_headers, expires_at }
+        ↓  PUT <upload_url>   (phone → storage, direct)
+POST /v1/scans/{id}/document/commit             (device_key)  { sha256 }
+→ 200 { committed: true }
+
 POST /v1/scans/{id}/close                       (device_key)  { page_order?: [page_id, …] }
 → 200 { state: "closed", page_count, pdf_ready }             # fires scan.closed
 ```
@@ -96,7 +102,11 @@ POST /v1/scans/{id}/close                       (device_key)  { page_order?: [pa
   An uncommitted page is collected after 15 minutes.
 - `idempotency_key` makes every write retry-safe — phone networks drop mid-upload.
 - A `clean` page is required; an `original` is optional and kept for reprocessing.
-- The PDF is assembled **on the phone** and uploaded as the scan's document.
+- **The document** is the pages as one PDF, assembled on the phone (`public/pdf.js`) so each
+  page's JPEG goes in whole and nothing is compressed a second time. `pdf_ready` is answered
+  from whether a document actually arrived — not from there being pages, which is not the same
+  thing. `GET /v1/scans/{id}/content` then returns the PDF, while `?page=n` still returns that
+  page as an image.
 - Pages arrive EXIF-stripped; the server strips anything remaining and sniffs content type
   rather than trusting an extension.
 

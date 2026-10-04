@@ -274,6 +274,41 @@ async function route(request, env, url, path, requestId) {
     return json(reply, 201);
   }
 
+  // The whole document, assembled on the phone: the pages' own JPEG bytes
+  // dropped into one PDF, so nothing is compressed a second time.
+  const documentMatch = path.match(/^\/v1\/scans\/([^/]+)\/document(\/commit)?$/);
+  if (documentMatch && method === 'POST') {
+    if (!can(caller, 'upload')) return problem('forbidden_scope', 'Only a paired phone can send the document', requestId);
+    const scan = await store.scanById(documentMatch[1]);
+    if (!scan || scan.account_id !== caller.account_id) return problem('not_found', 'No such document', requestId);
+
+    if (documentMatch[2]) return commitDocument(request, env, store, scan, requestId);
+
+    const body = await readJson(request);
+    const remembered = await replay(store, caller.device_id, body.idempotency_key);
+    if (remembered) return remembered;
+
+    const declared = Number(body.bytes);
+    if (!Number.isFinite(declared) || declared <= 0) return problem('invalid_request', 'The size of the document is required', requestId);
+    // A document is several pages, so it is allowed to be several pages big.
+    if (declared > Number(env.MAX_PAGE_BYTES) * Number(env.MAX_PAGES_PER_SCAN)) {
+      return problem('page_too_large', 'That document is too big', requestId);
+    }
+    if (typeof body.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(body.sha256)) {
+      return problem('invalid_request', 'A sha256 of the document is required', requestId);
+    }
+
+    const key = `${scan.account_id}/${scan.id}/document.pdf`;
+    await store.promiseDocument({ scanId: scan.id, key, sha: body.sha256, bytes: declared });
+    const reply = {
+      upload_url: `${url.origin}/v1/uploads/${await mint(env.SESSION_SECRET, { kind: 'upload', sub: caller.account_id, sid: scan.id, doc: 1 }, 300)}`,
+      upload_headers: {},
+      expires_at: plusSeconds(300),
+    };
+    await keep(store, caller.device_id, body.idempotency_key, 201, reply);
+    return json(reply, 201);
+  }
+
   const commitMatch = path.match(/^\/v1\/scans\/([^/]+)\/pages\/([^/]+)\/commit$/);
   if (commitMatch && method === 'POST') {
     if (!can(caller, 'upload')) return problem('forbidden_scope', 'Only a paired phone can finish a page', requestId);
@@ -288,7 +323,14 @@ async function route(request, env, url, path, requestId) {
     const count = await store.countPages(scan.id);
     if (scan.state === 'open') await store.closeScan(scan.id);
     await announce(env, scan.channel_id, { event: 'scan.closed', scan_id: scan.id, page_count: count?.n ?? 0 });
-    return json({ scan_id: scan.id, state: 'closed', page_count: count?.n ?? 0, pdf_ready: (count?.n ?? 0) > 0 });
+    return json({
+      scan_id: scan.id,
+      state: 'closed',
+      page_count: count?.n ?? 0,
+      // Answered from whether a document actually arrived, rather than assumed
+      // from there being pages.
+      pdf_ready: Boolean(scan.document_at),
+    });
   }
 
   // --- reading ------------------------------------------------------------
@@ -318,7 +360,10 @@ async function route(request, env, url, path, requestId) {
     if (method === 'DELETE') {
       const { results } = await store.listPages(scan.id, 'clean');
       const originals = await store.listPages(scan.id, 'original');
-      await env.FILES.delete([...(results ?? []), ...(originals.results ?? [])].map((p) => `${scan.account_id}/${scan.id}/${p.index}-${p.variant}`));
+      const keys = [...(results ?? []), ...(originals.results ?? [])]
+        .map((p) => `${scan.account_id}/${scan.id}/${p.index}-${p.variant}`);
+      if (scan.document_key) keys.push(scan.document_key);
+      await env.FILES.delete(keys);
       await store.deleteScan(scan.id, caller.account_id);
       return noContent();
     }
@@ -374,6 +419,21 @@ async function receiveBytes(request, env, store, token, requestId) {
   const claims = await verify(env.SESSION_SECRET, token);
   if (!claims || claims.kind !== 'upload') return problem('unauthenticated', 'That upload address is not valid any more', requestId);
 
+  // The assembled document rather than one page.
+  if (claims.doc) {
+    const scan = await store.scanById(claims.sid);
+    if (!scan?.document_key) return problem('not_found', 'No document was announced', requestId);
+    const bytes = new Uint8Array(await request.arrayBuffer());
+    if (bytes.length > Number(env.MAX_PAGE_BYTES) * Number(env.MAX_PAGES_PER_SCAN)) {
+      return problem('page_too_large', 'That document is too big', requestId);
+    }
+    await env.FILES.put(scan.document_key, bytes, {
+      httpMetadata: { contentType: 'application/pdf' },
+      customMetadata: { sha256: await sha256Hex(bytes) },
+    });
+    return json({ received: bytes.length });
+  }
+
   const page = await store.pageById(claims.pid);
   if (!page) return problem('not_found', 'No such page', requestId);
 
@@ -395,6 +455,28 @@ async function receiveBytes(request, env, store, token, requestId) {
     },
   });
   return json({ received: bytes.length });
+}
+
+async function commitDocument(request, env, store, scan, requestId) {
+  if (!scan.document_key) return problem('invalid_request', 'No document was announced', requestId);
+  if (scan.document_at) return json({ committed: true });     // a retry, not a second document
+
+  const stored = await env.FILES.head(scan.document_key);
+  const drop = async (code, detail) => {
+    await env.FILES.delete(scan.document_key);
+    await store.clearDocument(scan.id);
+    return problem(code, detail, requestId);
+  };
+  if (!stored) return drop('invalid_request', 'The bytes of that document never arrived');
+
+  const body = await readJson(request);
+  const promised = typeof body.sha256 === 'string' ? body.sha256 : scan.document_sha;
+  if (stored.customMetadata?.sha256 !== promised || promised !== scan.document_sha) {
+    return drop('checksum_mismatch', 'The bytes that arrived are not the ones promised');
+  }
+
+  await store.commitDocument(scan.id);
+  return json({ committed: true });
 }
 
 async function commitPage(request, env, store, scanId, pageId, caller, requestId) {
@@ -454,6 +536,17 @@ async function serveContent(env, store, scanId, url, caller, requestId) {
   const variant = url.searchParams.get('variant') === 'original' ? 'original' : 'clean';
   const asked = url.searchParams.get('page');
   const idx = asked === null ? null : Number(asked) - 1;      // ?page=1 is the first page
+
+  // Asked for the whole thing, and there is a document: that is the answer.
+  // A particular page is still served as an image.
+  if (idx === null && variant === 'clean' && scan.document_at && scan.document_key) {
+    const document = await env.FILES.get(scan.document_key);
+    if (document) {
+      return new Response(document.body, {
+        headers: { 'content-type': 'application/pdf', 'cache-control': 'private, no-store' },
+      });
+    }
+  }
 
   const page = idx === null
     ? (await store.listPages(scan.id, variant)).results?.[0]

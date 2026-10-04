@@ -1,0 +1,394 @@
+// The phone: pair once, then photograph pages and send the document.
+//
+// The order of work matters and is the same as in clean.js: the page is found
+// and straightened at the photograph's own resolution, and only then shrunk to
+// what 300 DPI needs. Shrinking first would resample the image twice and soften
+// the small text that was the reason for scanning it.
+//
+// Drawing the photo through a canvas is also what strips the camera's metadata,
+// so the location it was taken at never leaves the phone.
+
+import { cleanPage, detectPage, MAX_LONG_EDGE } from './clean.js';
+import { buildPdf } from './pdf.js';
+
+const DECODE_LONG_EDGE = 4000;    // ~12 MP: enough that a cropped page still reaches 300 DPI
+const QUALITY = 0.85;
+const HANDLE_GRAB = 28;           // how close a thumb has to be, in CSS pixels
+
+const $ = (id) => document.getElementById(id);
+const params = new URLSearchParams(location.search);
+
+let deviceKey = null;
+try { deviceKey = localStorage.getItem('snapiq.device'); } catch { /* private window */ }
+const channelId = params.get('c') || null;
+
+let scanId = null;
+let pages = [];            // { jpeg, width, height } for the PDF
+let shot = null;           // { image, corners } awaiting confirmation
+let dragging = -1;
+
+// --- talking to the API ---------------------------------------------------
+
+const api = async (path, { method = 'GET', body, token = deviceKey } = {}) => {
+  const response = await fetch(path, {
+    method,
+    headers: {
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+      ...(body ? { 'content-type': 'application/json' } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  let parsed = null;
+  try { parsed = await response.json(); } catch { /* no body */ }
+  return { status: response.status, body: parsed };
+};
+
+const hex = (buffer) => [...new Uint8Array(buffer)].map((b) => b.toString(16).padStart(2, '0')).join('');
+const digestOf = async (bytes) => hex(await crypto.subtle.digest('SHA-256', bytes));
+
+const say = (text, kind = 'ok') => {
+  const note = $('note');
+  note.textContent = text;
+  note.className = `note ${kind}`;
+};
+const clearSay = () => $('note').classList.add('hidden');
+
+// --- pairing, once --------------------------------------------------------
+
+async function pair(claimToken) {
+  const label = /iPhone|iPad/.test(navigator.userAgent) ? 'iPhone'
+    : /Android/.test(navigator.userAgent) ? 'Android phone' : 'a phone';
+  const { status, body } = await api('/v1/devices/claim', {
+    method: 'POST', token: null, body: { claim_token: claimToken, label },
+  });
+  if (status === 201) {
+    deviceKey = body.device_key;
+    try { localStorage.setItem('snapiq.device', deviceKey); } catch { /* this visit only */ }
+    stripClaimFromUrl();
+    say('This phone is linked. You only do this once.');
+    return;
+  }
+  say(status === 410
+    ? 'That code has already been used. Ask your computer for a new one.'
+    : 'That code did not work. Ask your computer for a new one.', 'bad');
+}
+
+// The token in the address is single use and now spent; leaving it in the bar
+// means it ends up in history and in anything that reads the URL.
+const stripClaimFromUrl = () =>
+  history.replaceState(null, '', channelId ? `/phone?c=${encodeURIComponent(channelId)}` : '/phone');
+
+// --- taking the photograph ------------------------------------------------
+
+async function toImageData(file) {
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, DECODE_LONG_EDGE / Math.max(bitmap.width, bitmap.height));
+  const width = Math.round(bitmap.width * scale);
+  const height = Math.round(bitmap.height * scale);
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext('2d', { alpha: false, willReadFrequently: true });
+  context.drawImage(bitmap, 0, 0, width, height);
+  bitmap.close?.();
+  return context.getImageData(0, 0, width, height);
+}
+
+async function took(file) {
+  if (!file) return;
+  screen('busy');
+  $('busy-text').textContent = 'Looking for the page…';
+  try {
+    const image = await toImageData(file);
+    // No page found is a real answer: the whole frame is offered instead of a
+    // confident wrong crop, and the corners can be dragged.
+    const found = detectPage(image);
+    shot = { image, corners: found ?? frameOf(image), detected: Boolean(found) };
+    drawCrop();
+    screen('crop');
+    say(shot.detected ? 'Drag a corner if the edges are wrong.' : 'No page found — drag the corners to its edges.',
+      shot.detected ? 'ok' : 'bad');
+  } catch (error) {
+    screen('ready');
+    say(error.message || 'That photo could not be read.', 'bad');
+  }
+}
+
+const frameOf = (image) => [
+  [0, 0], [image.width - 1, 0], [image.width - 1, image.height - 1], [0, image.height - 1],
+];
+
+// --- the crop you can correct ---------------------------------------------
+
+function drawCrop() {
+  const canvas = $('crop-canvas');
+  const { image, corners } = shot;
+  const room = Math.min(window.innerWidth - 32, 460);
+  const scale = room / image.width;
+  canvas.width = Math.round(image.width * scale);
+  canvas.height = Math.round(image.height * scale);
+
+  const context = canvas.getContext('2d');
+  // The photo, at screen size. A plain canvas rather than an OffscreenCanvas:
+  // this has to work on an older iPhone, and nothing here is hot enough to
+  // need the faster one.
+  const source = document.createElement('canvas');
+  source.width = image.width;
+  source.height = image.height;
+  source.getContext('2d').putImageData(image, 0, 0);
+  context.drawImage(source, 0, 0, canvas.width, canvas.height);
+
+  const at = ([x, y]) => [x * scale, y * scale];
+
+  // Everything outside the page, dimmed, so the crop reads at a glance.
+  context.save();
+  context.beginPath();
+  context.rect(0, 0, canvas.width, canvas.height);
+  context.moveTo(...at(corners[0]));
+  for (const corner of corners.slice(1)) context.lineTo(...at(corner));
+  context.closePath();
+  context.fillStyle = 'rgba(10,12,16,.55)';
+  context.fill('evenodd');
+  context.restore();
+
+  context.beginPath();
+  context.moveTo(...at(corners[0]));
+  for (const corner of corners.slice(1)) context.lineTo(...at(corner));
+  context.closePath();
+  context.strokeStyle = '#8aa2ff';
+  context.lineWidth = 2;
+  context.stroke();
+
+  for (const corner of corners) {
+    const [x, y] = at(corner);
+    context.beginPath();
+    context.arc(x, y, 11, 0, Math.PI * 2);
+    context.fillStyle = '#fff';
+    context.fill();
+    context.strokeStyle = '#3b5bdb';
+    context.lineWidth = 3;
+    context.stroke();
+  }
+  canvas.dataset.scale = String(scale);
+}
+
+const pointerAt = (event) => {
+  const canvas = $('crop-canvas');
+  const box = canvas.getBoundingClientRect();
+  const scale = Number(canvas.dataset.scale);
+  return { x: (event.clientX - box.left) / scale, y: (event.clientY - box.top) / scale, scale };
+};
+
+function grab(event) {
+  if (!shot) return;
+  const { x, y, scale } = pointerAt(event);
+  let nearest = -1;
+  let best = Infinity;
+  shot.corners.forEach(([cx, cy], index) => {
+    const distance = Math.hypot(cx - x, cy - y) * scale;
+    if (distance < best) { best = distance; nearest = index; }
+  });
+  if (best <= HANDLE_GRAB) {
+    dragging = nearest;
+    $('crop-canvas').setPointerCapture?.(event.pointerId);
+    event.preventDefault();
+  }
+}
+
+function drag(event) {
+  if (dragging < 0 || !shot) return;
+  const { x, y } = pointerAt(event);
+  shot.corners[dragging] = [
+    Math.max(0, Math.min(shot.image.width - 1, Math.round(x))),
+    Math.max(0, Math.min(shot.image.height - 1, Math.round(y))),
+  ];
+  drawCrop();
+  event.preventDefault();
+}
+
+const release = () => { dragging = -1; };
+
+// --- cleaning and sending -------------------------------------------------
+
+async function useThisPage() {
+  if (!shot) return;
+  screen('busy');
+  $('busy-text').textContent = 'Straightening and cleaning…';
+  // Let the browser paint that before the work begins.
+  await new Promise((resolve) => setTimeout(resolve, 16));
+
+  try {
+    const cleaned = cleanPage(shot.image, shot.detected || moved() ? shot.corners : null, { maxEdge: MAX_LONG_EDGE });
+    const blob = await encode(cleaned);
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+
+    $('busy-text').textContent = 'Sending…';
+    await upload(bytes);
+
+    pages.push({ jpeg: bytes, width: cleaned.width, height: cleaned.height });
+    addThumb(blob);
+    shot = null;
+    screen('ready');
+    say(pages.length === 1 ? 'Page sent. It is on your computer.' : `${pages.length} pages sent.`);
+    $('take-label').textContent = 'Add another page';
+    $('done').classList.remove('hidden');
+    $('hint').textContent = 'Add more pages, or press Done to finish the document.';
+  } catch (error) {
+    screen('crop');
+    say(error.message || 'That did not work. Try again.', 'bad');
+  }
+}
+
+// Did the person move the corners away from the whole frame? If so, use them
+// even though nothing was detected automatically.
+function moved() {
+  const frame = frameOf(shot.image);
+  return shot.corners.some((corner, i) => corner[0] !== frame[i][0] || corner[1] !== frame[i][1]);
+}
+
+async function encode({ data, width, height }) {
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  canvas.getContext('2d').putImageData(new ImageData(data, width, height), 0, 0);
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => (blob ? resolve(blob) : reject(new Error('the page could not be encoded'))),
+      'image/jpeg',
+      QUALITY
+    );
+  });
+}
+
+async function upload(bytes) {
+  const digest = await digestOf(bytes);
+
+  if (!scanId) {
+    const started = await api('/v1/scans', {
+      method: 'POST',
+      body: { channel_id: channelId, idempotency_key: crypto.randomUUID() },
+    });
+    if (started.status === 401) return unlink();
+    if (started.status !== 201) throw new Error(started.body?.detail ?? 'could not start the document');
+    scanId = started.body.scan_id;
+  }
+
+  const asked = await api(`/v1/scans/${scanId}/pages`, {
+    method: 'POST',
+    body: { bytes: bytes.length, content_type: 'image/jpeg', sha256: digest, idempotency_key: crypto.randomUUID() },
+  });
+  if (asked.status !== 201) throw new Error(asked.body?.detail ?? 'could not add the page');
+
+  const put = await fetch(asked.body.upload_url, {
+    method: 'PUT', headers: { 'content-type': 'image/jpeg' }, body: bytes,
+  });
+  if (!put.ok) throw new Error('the upload did not go through');
+
+  const committed = await api(`/v1/scans/${scanId}/pages/${asked.body.page_id}/commit`, {
+    method: 'POST', body: { sha256: digest },
+  });
+  if (committed.status !== 200) throw new Error(committed.body?.detail ?? 'the page did not arrive whole');
+}
+
+// --- finishing: the pages become one document -----------------------------
+
+async function finish() {
+  if (!scanId || !pages.length) return;
+  screen('busy');
+  $('busy-text').textContent = 'Building the document…';
+  await new Promise((resolve) => setTimeout(resolve, 16));
+
+  try {
+    const pdf = buildPdf(pages);
+    const digest = await digestOf(pdf);
+
+    const asked = await api(`/v1/scans/${scanId}/document`, {
+      method: 'POST',
+      body: { bytes: pdf.length, sha256: digest, idempotency_key: crypto.randomUUID() },
+    });
+    if (asked.status !== 201) throw new Error(asked.body?.detail ?? 'could not send the document');
+
+    const put = await fetch(asked.body.upload_url, {
+      method: 'PUT', headers: { 'content-type': 'application/pdf' }, body: pdf,
+    });
+    if (!put.ok) throw new Error('the document did not go through');
+
+    const committed = await api(`/v1/scans/${scanId}/document/commit`, { method: 'POST', body: { sha256: digest } });
+    if (committed.status !== 200) throw new Error('the document did not arrive whole');
+
+    const closed = await api(`/v1/scans/${scanId}/close`, { method: 'POST', body: {} });
+    if (closed.status !== 200) throw new Error('could not finish the document');
+
+    const count = closed.body.page_count;
+    say(`Done — ${count} page${count === 1 ? '' : 's'} on your computer.`);
+    reset();
+  } catch (error) {
+    screen('ready');
+    say(error.message || 'Could not finish the document.', 'bad');
+  }
+}
+
+function reset() {
+  scanId = null;
+  pages = [];
+  shot = null;
+  $('pages').replaceChildren();
+  $('take-label').textContent = 'Take a photo';
+  $('done').classList.add('hidden');
+  $('hint').textContent = 'It will appear on your computer straight away.';
+  screen('ready');
+}
+
+function addThumb(blob) {
+  const img = document.createElement('img');
+  img.src = URL.createObjectURL(blob);
+  img.alt = '';
+  $('pages').append(img);
+}
+
+function unlink() {
+  deviceKey = null;
+  try { localStorage.removeItem('snapiq.device'); } catch { /* nothing to remove */ }
+  screen('unpaired');
+  say('This phone was unlinked. Scan a new code from your computer.', 'bad');
+}
+
+// --- which screen ---------------------------------------------------------
+
+function screen(which) {
+  for (const name of ['unpaired', 'ready', 'crop', 'busy']) {
+    $(name).classList.toggle('hidden', name !== which);
+  }
+}
+
+// --- wiring ---------------------------------------------------------------
+
+$('take').onclick = () => $('camera').click();
+$('choose').onclick = () => $('gallery').click();
+$('done').onclick = finish;
+$('use-page').onclick = useThisPage;
+$('retake').onclick = () => { shot = null; clearSay(); screen('ready'); };
+$('whole-photo').onclick = () => {
+  shot.corners = frameOf(shot.image);
+  shot.detected = false;
+  drawCrop();
+};
+
+for (const id of ['camera', 'gallery']) {
+  $(id).onchange = (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    took(file);
+  };
+}
+
+const canvas = $('crop-canvas');
+canvas.addEventListener('pointerdown', grab);
+canvas.addEventListener('pointermove', drag);
+canvas.addEventListener('pointerup', release);
+canvas.addEventListener('pointercancel', release);
+
+const claim = params.get('t');
+if (claim && !deviceKey) await pair(claim);
+else if (claim) stripClaimFromUrl();
+screen(deviceKey ? 'ready' : 'unpaired');

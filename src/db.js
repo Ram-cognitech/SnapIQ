@@ -120,6 +120,21 @@ export const db = (D1) => ({
   deleteScan: (id, accountId) =>
     D1.prepare('DELETE FROM scans WHERE id = ? AND account_id = ?').bind(id, accountId).run(),
 
+  // --- the assembled document ---------------------------------------------
+
+  promiseDocument: ({ scanId, key, sha, bytes }) =>
+    D1.prepare(
+      'UPDATE scans SET document_key = ?, document_sha = ?, document_bytes = ?, document_at = NULL WHERE id = ?'
+    ).bind(key, sha, bytes, scanId).run(),
+
+  commitDocument: (scanId) =>
+    D1.prepare("UPDATE scans SET document_at = datetime('now') WHERE id = ?").bind(scanId).run(),
+
+  clearDocument: (scanId) =>
+    D1.prepare(
+      'UPDATE scans SET document_key = NULL, document_sha = NULL, document_bytes = NULL, document_at = NULL WHERE id = ?'
+    ).bind(scanId).run(),
+
   // --- pages --------------------------------------------------------------
 
   async createPage({ scanId, idx, variant, objectKey, contentType, bytes, sha256 }) {
