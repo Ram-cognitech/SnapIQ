@@ -84,6 +84,17 @@ async function route(request, env, url, path, requestId) {
     return claimPairing(request, store, requestId);
   }
 
+  // Anything outside /v1 is not an API call, so it is not an authentication
+  // failure either: opening the root in a browser should say what this is, and
+  // a wrong address should say it does not exist, rather than both of them
+  // asking someone to sign in.
+  if (!path.startsWith('/v1/')) {
+    if (path === '/' || path === '/health') {
+      return json({ name: 'SnapIQ', state: 'the api is running', api: '/v1', docs: 'docs/api.md' });
+    }
+    return problem('not_found', 'No such address', requestId);
+  }
+
   const caller = await identify(request, env, store);
   if (!caller) return problem('unauthenticated', 'Sign in first', requestId);
   if (caller.kind === 'device' && caller.revoked) {

@@ -111,3 +111,20 @@ describe('credentials never come back out', () => {
   // implementation when logging is written, not here. Leaving it unasserted
   // rather than pretending to cover it.
 });
+
+describe('a wrong address says so', () => {
+  it('answers the root without credentials, instead of demanding a sign-in', async () => {
+    const root = await api('/');
+    expect(root.status).toBe(200);
+    expect(root.body.name).toBe('SnapIQ');
+  });
+
+  it('calls an unknown address missing rather than unauthenticated', async () => {
+    // Opening the wrong URL in a browser used to report an authentication
+    // failure, which sent the reader looking for a credential problem that was
+    // not there.
+    const nowhere = await api('/not-a-real-place');
+    expect(nowhere.status).toBe(404);
+    expect(nowhere.body.code).toBe('not_found');
+  });
+});
