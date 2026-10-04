@@ -1,0 +1,14 @@
+{
+  "name": "snapiq",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Scan a document with your phone; it lands on the computer in front of you.",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.8"
+  }
+}
