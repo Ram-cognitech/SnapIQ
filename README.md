@@ -38,19 +38,23 @@ the Durable Object runs in the same process. An account is needed to deploy, not
 
 ```bash
 npm install
-npx wrangler d1 migrations apply snapiq --local
-npx wrangler dev                                   # http://127.0.0.1:8787
+npm run migrate
+npm run dev                                        # http://127.0.0.1:8787
 
 # in another terminal
-SNAPIQ_TEST_JWT=$(node scripts/token.mjs) npm test
+npm run test:local
 ```
 
 `.dev.vars` holds the two local secrets (`OPERATOR_PASSPHRASE`, `SESSION_SECRET`) and is not
 committed. For a deployment they are set with `wrangler secret put`.
 
-## Shape of the build, when it starts
+## How it is built
 
-Free tier throughout, so it costs nothing to run while it is proven:
+Free tier throughout, so it costs nothing to run while it is proven. The first version uses
+Cloudflare alone: with one user, Supabase's sign-up and password-reset machinery protects
+nobody and its per-user database rules have no second user to separate, so the store is D1
+with every query in `src/db.js` - which is the whole of the move to Postgres the day a second
+person signs up.
 
 - **Cloudflare Pages** — the webapp and the capture page (an installable PWA), HTTPS included
 - **Workers** — the API. 10 ms CPU per request on the free plan, which is why image work

@@ -5,7 +5,10 @@
   "type": "module",
   "description": "Scan a document with your phone; it lands on the computer in front of you.",
   "scripts": {
+    "dev": "wrangler dev",
+    "migrate": "wrangler d1 migrations apply snapiq --local",
     "test": "vitest run",
+    "test:local": "node scripts/test-local.mjs",
     "test:watch": "vitest"
   },
   "devDependencies": {
