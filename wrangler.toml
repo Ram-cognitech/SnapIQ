@@ -1,0 +1,39 @@
+name = "snapiq"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+# Everything here runs locally with `wrangler dev` and needs no Cloudflare
+# account: D1 is a local SQLite file, R2 a local directory, and the Durable
+# Object runs in the same process. An account is needed to deploy, not to build.
+
+[[d1_databases]]
+binding = "DB"
+database_name = "snapiq"
+database_id = "local"            # replaced with the real id at first deploy
+migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "FILES"
+bucket_name = "snapiq-scans"
+
+[[durable_objects.bindings]]
+name = "CHANNEL"
+class_name = "Channel"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Channel"]
+
+[vars]
+# The caps from docs/api.md section 7. Pixels first, bytes second.
+MAX_LONG_EDGE_CLEAN = "3500"
+MAX_LONG_EDGE_ORIGINAL = "4000"
+MAX_PAGE_BYTES = "10485760"      # 10 MB hard rejection
+MAX_PAGES_PER_SCAN = "50"
+GROUPING_WINDOW_SECONDS = "120"
+# v0 keeps nothing it was not asked to keep, and keeps no originals.
+RETENTION = "keep"
+ORIGINALS_ALLOWED = "false"
+
+# Secrets, set with `wrangler secret put` for a deployment and in .dev.vars
+# locally: OPERATOR_PASSPHRASE, SESSION_SECRET.

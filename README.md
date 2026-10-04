@@ -28,8 +28,25 @@ Lens. Two things those do not do, and they are the whole product:
 
 ## State
 
-Specification stage. No implementation yet, deliberately: the API is written down and its
-contract tests are written against it before anything is built.
+The API works and its 22 contract tests pass. The capture page — the part that crops,
+straightens and builds the PDF on the phone — is next.
+
+## Running it
+
+Nothing here needs a Cloudflare account: D1 is a local SQLite file, R2 a local directory, and
+the Durable Object runs in the same process. An account is needed to deploy, not to build.
+
+```bash
+npm install
+npx wrangler d1 migrations apply snapiq --local
+npx wrangler dev                                   # http://127.0.0.1:8787
+
+# in another terminal
+SNAPIQ_TEST_JWT=$(node scripts/token.mjs) npm test
+```
+
+`.dev.vars` holds the two local secrets (`OPERATOR_PASSPHRASE`, `SESSION_SECRET`) and is not
+committed. For a deployment they are set with `wrangler secret put`.
 
 ## Shape of the build, when it starts
 
