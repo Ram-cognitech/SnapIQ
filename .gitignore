@@ -7,3 +7,11 @@ dist/
 *.log
 .DS_Store
 tmp/
+
+# Photographs used to test the pipeline are real documents - the first one
+# carried a name, a telephone number and a health insurance number. None of
+# them belongs in a repository, so the patterns are wider than one folder.
+tmp*
+*.jpg
+*.jpeg
+!public/icon-*.png

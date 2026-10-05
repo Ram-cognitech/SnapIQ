@@ -330,6 +330,56 @@ export function removeShadow(image, { radius = 0.08, strength = 1 } = {}) {
   return out;
 }
 
+// The brightest value within `radius` of each pixel, done as two passes of a
+// one-dimensional maximum, which is what makes it affordable: a square window
+// costs the same as a line.
+//
+// The running maximum keeps a queue of candidates in decreasing order, so each
+// pixel enters and leaves once however wide the window is.
+export const localMax = (image, radius) => rank(image, radius, true);
+export const localMin = (image, radius) => rank(image, radius, false);
+
+// Dilate, then erode by the same amount: the text disappears because it is
+// narrower than the window, while the edge of a shadow stays where it is,
+// because whatever the dilation pushed outwards the erosion pulls back.
+//
+// Using the dilation on its own - which is what the first attempt did - makes
+// the estimated lighting brighter than the paper everywhere near a shadow, so
+// the division under-corrects exactly where the shadow is. Measured on a real
+// photograph: shadowed paper reached 147 where lit paper reached 240.
+export const closing = (image, radius) => localMin(localMax(image, radius), radius);
+
+function rank({ data, width, height }, radius, wantMax) {
+  const horizontal = new Uint8ClampedArray(data.length);
+  const out = new Uint8ClampedArray(data.length);
+  const queue = new Int32Array(Math.max(width, height));
+  const better = wantMax ? (a, b) => a <= b : (a, b) => a >= b;
+
+  const pass = (source, target, length, lines, index) => {
+    for (let line = 0; line < lines; line++) {
+      let head = 0;
+      let tail = 0;
+      for (let i = 0; i < length + radius; i++) {
+        if (i < length) {
+          const value = source[index(line, i)];
+          while (tail > head && better(source[index(line, queue[tail - 1])], value)) tail--;
+          queue[tail++] = i;
+        }
+        const at = i - radius;
+        if (at >= 0) {
+          // Drop anything that has fallen out of the window behind us.
+          while (head < tail && queue[head] < at - radius) head++;
+          target[index(line, at)] = source[index(line, queue[head])];
+        }
+      }
+    }
+  };
+
+  pass(data, horizontal, width, height, (line, i) => line * width + i);
+  pass(horizontal, out, height, width, (line, i) => i * width + line);
+  return { data: out, width, height };
+}
+
 export function boxBlur({ data, width, height }, radius) {
   const horizontal = new Uint8ClampedArray(data.length);
   const out = new Uint8ClampedArray(data.length);
@@ -413,26 +463,60 @@ export function autoContrast(image, { low = 0.01, high = 0.995 } = {}) {
 //   floor   how much of the dark end may be crushed to black, at most.
 //   radius  how slowly the lighting is assumed to change. Too small and the
 //           writing is read as shadow and eaten.
-export function enhance(image, { paper = 242, gamma = 1.15, floor = 0.55, radius = 0.12, strength = 1 } = {}) {
+export function enhance(image, { paper = 242, gamma = 1.15, floor = 0.55, window = 0.035, strength = 1 } = {}) {
   const { data, width, height } = image;
-  const gray = luminance(image);
-  const small = shrinkGray(gray, 96);
-  const background = boxBlur(small, Math.max(3, Math.round(Math.max(small.width, small.height) * radius)));
 
-  const sx = small.width / width;
-  const sy = small.height / height;
-  const backgroundAt = (x, y) =>
-    Math.max(24, background.data[Math.min(small.height - 1, (y * sy) | 0) * small.width + Math.min(small.width - 1, (x * sx) | 0)]);
+  // The lighting is worked out for each colour separately, which is what takes
+  // the colour of the room out along with its shadow: paper under a warm lamp
+  // has more red in it than blue, and dividing each channel by its own
+  // background lands all three on the same white. Doing it once on brightness
+  // and applying the result to all three channels keeps the cast and makes it
+  // stronger wherever the correction is largest.
+  const planes = [0, 1, 2].map((channel) => {
+    const plane = new Uint8ClampedArray(width * height);
+    for (let p = 0, i = channel; p < plane.length; p++, i += 4) plane[p] = data[i];
+    // Big enough that a hard shadow edge stays an edge: at 96 pixels across,
+    // the boundary of a hand's shadow is three pixels wide.
+    const small = shrinkGray({ data: plane, width, height }, 384);
+    const span = Math.max(4, Math.round(Math.max(small.width, small.height) * window));
+    // A light smoothing afterwards, small enough not to drag the shadow's edge
+    // about again.
+    return { small, background: boxBlur(closing(small, span), 2) };
+  });
 
-  // How bright each pixel is compared with the lighting around it. Paper comes
-  // out near 1 wherever it is in the frame; ink comes out well below.
+  const sx = planes[0].small.width / width;
+  const sy = planes[0].small.height / height;
+  const sampleAt = ({ small, background }, x, y) => {
+    const fx = Math.min(small.width - 1, x * sx);
+    const fy = Math.min(small.height - 1, y * sy);
+    const x0 = fx | 0;
+    const y0 = fy | 0;
+    const x1 = Math.min(x0 + 1, small.width - 1);
+    const y1 = Math.min(y0 + 1, small.height - 1);
+    const ax = fx - x0;
+    const ay = fy - y0;
+    const top = background.data[y0 * small.width + x0] * (1 - ax) + background.data[y0 * small.width + x1] * ax;
+    const bottom = background.data[y1 * small.width + x0] * (1 - ax) + background.data[y1 * small.width + x1] * ax;
+    return Math.max(16, top * (1 - ay) + bottom * ay);
+  };
+
+  // How bright each pixel is next to the lighting around it. Paper comes out
+  // near 1 wherever it is on the page, lit or shadowed; ink comes out well
+  // below. The percentiles are taken on brightness so that a coloured page
+  // does not shift them.
   const BUCKETS = 1024;
   const histogram = new Uint32Array(BUCKETS);
-  const ratioOf = (x, y) => gray.data[y * width + x] / backgroundAt(x, y);
+  const ratios = new Float32Array(width * height * 3);
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
-      const bucket = Math.min(BUCKETS - 1, (ratioOf(x, y) * (BUCKETS / 2)) | 0);
-      histogram[bucket]++;
+      const p = y * width + x;
+      let luma = 0;
+      for (let c = 0; c < 3; c++) {
+        const ratio = data[p * 4 + c] / sampleAt(planes[c], x, y);
+        ratios[p * 3 + c] = ratio;
+        luma += ratio * (c === 0 ? 0.299 : c === 1 ? 0.587 : 0.114);
+      }
+      histogram[Math.min(BUCKETS - 1, (luma * (BUCKETS / 2)) | 0)]++;
     }
   }
   const at = (fraction) => {
@@ -452,20 +536,14 @@ export function enhance(image, { paper = 242, gamma = 1.15, floor = 0.55, radius
   const low = Math.min(floor, Math.max(0, inkRatio / paperRatio));
 
   const out = { data: new Uint8ClampedArray(data.length), width, height };
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const luma = gray.data[y * width + x];
-      const normalised = (ratioOf(x, y) / paperRatio - low) / (1 - low);
+  for (let p = 0; p < width * height; p++) {
+    for (let c = 0; c < 3; c++) {
+      const normalised = (ratios[p * 3 + c] / paperRatio - low) / (1 - low);
       const curved = Math.pow(Math.min(1, Math.max(0, normalised)), gamma);
-      const target = curved * paper;
-      // Applied as a gain so colour survives: a red stamp stays red.
-      const gain = (target / Math.max(1, luma)) * strength + (1 - strength);
-      const i = (y * width + x) * 4;
-      out.data[i] = data[i] * gain;
-      out.data[i + 1] = data[i + 1] * gain;
-      out.data[i + 2] = data[i + 2] * gain;
-      out.data[i + 3] = 255;
+      const corrected = curved * paper;
+      out.data[p * 4 + c] = corrected * strength + data[p * 4 + c] * (1 - strength);
     }
+    out.data[p * 4 + 3] = 255;
   }
   return out;
 }

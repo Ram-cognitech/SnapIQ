@@ -10,7 +10,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
-  autoContrast, detectPage, enhance, homography, luminance, otsu, outputSize, TONES,
+  autoContrast, closing, detectPage, enhance, homography, localMax, luminance, otsu, outputSize, TONES,
   polygonArea, removeShadow, warpPerspective, cleanPage,
 } from '../../public/clean.js';
 
@@ -272,5 +272,85 @@ describe('setting the tone in one pass', () => {
     for (let y = 0; y < 48; y++) rows.push(gray.data[y * page.width + 120]);
     // There should still be a clear swing between the lines and the gaps.
     expect(Math.max(...rows) - Math.min(...rows)).toBeGreaterThan(30);
+  });
+});
+
+describe('a hard shadow across the page', () => {
+  // The failure a real photograph found: a hand's shadow with a sharp edge,
+  // covering part of a written page. Estimating the lighting with a blur
+  // cannot represent an edge, and estimating it with a dilation alone reads
+  // brighter than the paper near one - measured on the real photo, shadowed
+  // paper reached 147 where lit paper reached 240.
+  const shadowedPage = (width = 300, height = 400, { cut = 0.55, dark = 0.42 } = {}) => {
+    const data = new Uint8ClampedArray(width * height * 4);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const writing = y % 22 < 4 && x > width * 0.08 && x < width * 0.92;
+        // A hard edge, slanted, like something held above the page.
+        const inShadow = x > width * cut + (y - height / 2) * 0.25;
+        const value = (writing ? 70 : 215) * (inShadow ? dark : 1);
+        const i = (y * width + x) * 4;
+        data[i] = data[i + 1] = data[i + 2] = value;
+        data[i + 3] = 255;
+      }
+    }
+    return { data, width, height };
+  };
+
+  it('lands lit and shadowed paper at the same brightness', () => {
+    const page = enhance(shadowedPage());
+    const gray = luminance(page);
+    const paperAt = (x) => gray.data[11 * page.width + x];   // y=11 is between lines
+    const lit = paperAt(40);
+    const shadowed = paperAt(260);
+    expect(lit).toBeGreaterThan(215);
+    expect(shadowed).toBeGreaterThan(215);
+    // The whole point: the two sides of the edge must match.
+    expect(Math.abs(lit - shadowed)).toBeLessThan(16);
+  });
+
+  it('keeps the writing readable on both sides of the edge', () => {
+    const page = enhance(shadowedPage());
+    const gray = luminance(page);
+    for (const x of [40, 260]) {
+      const ink = gray.data[1 * page.width + x];
+      const paper = gray.data[11 * page.width + x];
+      expect(paper - ink, `contrast at ${x}`).toBeGreaterThan(50);
+    }
+  });
+
+  it('takes the colour of the room out along with its shadow', () => {
+    // Paper under a warm lamp: more red than blue, and more so where it is lit.
+    const base = shadowedPage();
+    for (let i = 0; i < base.data.length; i += 4) {
+      base.data[i] = Math.min(255, base.data[i] * 1.12);        // red up
+      base.data[i + 2] = base.data[i + 2] * 0.88;               // blue down
+    }
+    const page = enhance(base);
+    const redMinusBlue = (x) => {
+      const i = (11 * page.width + x) * 4;
+      return page.data[i] - page.data[i + 2];
+    };
+    expect(Math.abs(redMinusBlue(40))).toBeLessThan(12);
+    expect(Math.abs(redMinusBlue(260))).toBeLessThan(12);
+  });
+
+  it('closing leaves a hard edge where it is, unlike a dilation', () => {
+    const width = 120;
+    const height = 8;
+    const plane = new Uint8ClampedArray(width * height);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) plane[y * width + x] = x < 60 ? 220 : 90;
+    }
+    const image = { data: plane, width, height };
+    const dilated = localMax(image, 6);
+    const closed = closing(image, 6);
+    const at = (img, x) => img.data[4 * width + x];
+
+    // A dilation drags the bright side six pixels into the dark one.
+    expect(at(dilated, 64)).toBe(220);
+    // The closing puts it back.
+    expect(at(closed, 64)).toBe(90);
+    expect(at(closed, 56)).toBe(220);
   });
 });

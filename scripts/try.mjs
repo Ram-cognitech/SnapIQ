@@ -13,7 +13,7 @@ import { basename } from 'node:path';
 import { deflateSync } from 'node:zlib';
 import jpeg from 'jpeg-js';
 import {
-  cleanPage, detectPage, enhance, luminance, otsu, outputSize, polygonArea,
+  boxBlur, cleanPage, detectPage, enhance, localMax, luminance, otsu, outputSize, polygonArea,
   shrinkGray, warpPerspective, TONES,
 } from '../public/clean.js';
 
@@ -73,6 +73,23 @@ function main() {
   write(`${outDir}/${name}-0-mask.png`, maskImage(image));
 
   if (corners) {
+    // What `enhance` thinks the lighting is. If this does not follow the
+    // shadow, nothing downstream can remove it.
+    const straightForBg = warpPerspective(image, corners, outputSize(corners, 1200));
+    if (straightForBg) {
+      const g = luminance(straightForBg);
+      const small = shrinkGray(g, 384);
+      const span = Math.max(4, Math.round(Math.max(small.width, small.height) * 0.035));
+      const bg = boxBlur(localMax(small, span), Math.max(2, span >> 1));
+      console.log(`background ${small.width} x ${small.height}, window ${span}`);
+      const asImage = { data: new Uint8ClampedArray(bg.data.length * 4), width: bg.width, height: bg.height };
+      for (let i = 0; i < bg.data.length; i++) {
+        asImage.data[i * 4] = asImage.data[i * 4 + 1] = asImage.data[i * 4 + 2] = bg.data[i];
+        asImage.data[i * 4 + 3] = 255;
+      }
+      write(`${outDir}/${name}-4-background.png`, asImage);
+    }
+
     const size = outputSize(corners, 1200);
     console.log(`output     ${size.width} x ${size.height}`);
     const straight = warpPerspective(image, corners, size);
