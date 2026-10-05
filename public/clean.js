@@ -463,7 +463,17 @@ export function autoContrast(image, { low = 0.01, high = 0.995 } = {}) {
 //   floor   how much of the dark end may be crushed to black, at most.
 //   radius  how slowly the lighting is assumed to change. Too small and the
 //           writing is read as shadow and eaten.
-export function enhance(image, { paper = 242, gamma = 1.15, floor = 0.55, window = 0.035, strength = 1 } = {}) {
+export function enhance(image, {
+  paper = 252,          // where clean paper lands
+  paperPoint = 1.04,    // ratio at which a pixel counts as fully paper
+  punch = null,         // null = measured (pickPunch); a number forces it
+  inkBudget = 0.02,     // at most 2% of the writing may be lost to the curve
+  floor = 0.55,
+  window = 0.035,
+  denoise = true,
+  sharpen = 0.6,
+  strength = 1,
+} = {}) {
   const { data, width, height } = image;
 
   // The lighting is worked out for each colour separately, which is what takes
@@ -535,17 +545,125 @@ export function enhance(image, { paper = 242, gamma = 1.15, floor = 0.55, window
   // on it loses what little it has.
   const low = Math.min(floor, Math.max(0, inkRatio / paperRatio));
 
+  // How hard to pull paper to white and ink to black. Chosen by measurement,
+  // not by trust: see pickPunch.
+  const chosen = punch === null
+    ? pickPunch({ histogram, BUCKETS, paperRatio, low, paperPoint, paper, inkBudget })
+    : { punch, lost: null };
+
   const out = { data: new Uint8ClampedArray(data.length), width, height };
   for (let p = 0; p < width * height; p++) {
     for (let c = 0; c < 3; c++) {
-      const normalised = (ratios[p * 3 + c] / paperRatio - low) / (1 - low);
-      const curved = Math.pow(Math.min(1, Math.max(0, normalised)), gamma);
+      const curved = softCurve(ratios[p * 3 + c] / paperRatio, low, paperPoint, chosen.punch);
       const corrected = curved * paper;
       out.data[p * 4 + c] = corrected * strength + data[p * 4 + c] * (1 - strength);
     }
     out.data[p * 4 + 3] = 255;
   }
-  return out;
+
+  out.inkLost = chosen.lost;
+  return denoise || sharpen ? finish(out, { denoise, sharpen, paper }) : out;
+}
+
+// The tone curve: nothing below `low` survives, nothing above `paperPoint` is
+// pushed further, and smoothstep rounds both ends so the corners are soft.
+//
+// A soft top matters more than it sounds. A hard one turns every mark that is
+// a little lighter than the ink - pencil, a faded print, a watermark - into
+// paper, and that is the one way arithmetic can lose content. Each extra
+// `punch` is another smoothstep: more contrast, and more risk at that end,
+// which is why the number is chosen by measurement.
+export function softCurve(t, low, paperPoint, punch) {
+  let u = (t - low) / (paperPoint - low);
+  u = u < 0 ? 0 : u > 1 ? 1 : u;
+  for (let i = 0; i < punch; i++) u = u * u * (3 - 2 * u);
+  return u;
+}
+
+// Pick the strongest curve that does not erase the writing.
+//
+// The curve depends only on the ratio, and the ratios are already counted in a
+// histogram, so how much ink a given setting would lose can be worked out
+// exactly - no second pass over the pixels, no guessing. Ink is anything
+// clearly darker than paper; it is "lost" when the curve lands it close enough
+// to paper to be invisible.
+export function pickPunch({ histogram, BUCKETS, paperRatio, low, paperPoint, paper, inkBudget = 0.02 }) {
+  const ratioOfBucket = (b) => b / (BUCKETS / 2) / paperRatio;
+  const inkCut = (low + 1) / 2;            // halfway between the darkest ink and paper
+  const vanished = 245 / paper;            // indistinguishable from paper once drawn
+
+  let ink = 0;
+  for (let b = 0; b < BUCKETS; b++) if (ratioOfBucket(b) < inkCut) ink += histogram[b];
+  if (ink === 0) return { punch: 1, lost: 0 };
+
+  for (const punch of [3, 2, 1, 0]) {
+    let lost = 0;
+    for (let b = 0; b < BUCKETS; b++) {
+      if (!histogram[b]) continue;
+      const t = ratioOfBucket(b);
+      if (t >= inkCut) continue;
+      if (softCurve(t, low, paperPoint, punch) > vanished) lost += histogram[b];
+    }
+    if (lost / ink <= inkBudget) return { punch, lost: lost / ink };
+  }
+  return { punch: 0, lost: 0 };
+}
+
+// Flatten the paper and put the edge back on the writing.
+//
+// Both only make sense after the tone is set: smoothing first would blur text
+// into paper, and sharpening first would sharpen the sensor noise.
+function finish(image, { denoise, sharpen, paper }) {
+  const { width, height } = image;
+  const source = image.data;
+  const gray = luminance(image).data;
+  const out = new Uint8ClampedArray(source.length);
+  const paperFloor = paper * 0.78;
+  const flat = 14;              // a 3x3 range under this is noise, not an edge
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const p = y * width + x;
+      const i = p * 4;
+      out[i + 3] = 255;
+
+      if (x === 0 || y === 0 || x === width - 1 || y === height - 1) {
+        out[i] = source[i]; out[i + 1] = source[i + 1]; out[i + 2] = source[i + 2];
+        continue;
+      }
+
+      let min = 255;
+      let max = 0;
+      let total = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const v = gray[p + dy * width + dx];
+          if (v < min) min = v;
+          if (v > max) max = v;
+          total += v;
+        }
+      }
+      const mean = total / 9;
+
+      // Flat and bright: paper. Average it, and the sensor's mottle goes.
+      if (denoise && max - min < flat && mean > paperFloor) {
+        for (let c = 0; c < 3; c++) {
+          let channel = 0;
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) channel += source[(p + dy * width + dx) * 4 + c];
+          }
+          out[i + c] = channel / 9;
+        }
+        continue;
+      }
+
+      // Everything else is writing or an edge: give back the crispness that
+      // resizing and resampling cost it.
+      const edge = sharpen ? (gray[p] - mean) * sharpen : 0;
+      for (let c = 0; c < 3; c++) out[i + c] = source[i + c] + edge;
+    }
+  }
+  return { data: out, width, height, inkLost: image.inkLost };
 }
 
 // --- the whole job ---------------------------------------------------------
@@ -555,10 +673,19 @@ export function enhance(image, { paper = 242, gamma = 1.15, floor = 0.55, window
 // How bright the finished page should be. "normal" is the default; the other
 // two exist because the right answer depends on the paper and the light, and
 // the person holding the phone can see which it is.
+// How bright the finished page should be. "normal" is the default; the others
+// exist because the right answer depends on the paper and the light, and the
+// person holding the phone can see which it is.
+//
+// "text" is for a page that is only writing - it pulls almost to black on
+// white, which is what a photocopier does and what people picture when they
+// say "a scan". It is the strongest setting, so the ink guard matters most
+// there; a page with a photograph on it should use one of the others.
 export const TONES = {
-  soft:   { paper: 230, gamma: 1.3 },
-  normal: { paper: 242, gamma: 1.15 },
-  bright: { paper: 252, gamma: 1 },
+  soft:   { paper: 244, paperPoint: 1.10, sharpen: 0.4 },
+  normal: { paper: 252, paperPoint: 1.04, sharpen: 0.6 },
+  bright: { paper: 255, paperPoint: 0.99, sharpen: 0.7 },
+  text:   { paper: 255, paperPoint: 0.96, sharpen: 0.9, inkBudget: 0.015 },
 };
 
 export function cleanPage(image, corners = null, { maxEdge = MAX_LONG_EDGE, tone = 'normal' } = {}) {

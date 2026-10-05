@@ -98,6 +98,7 @@ function main() {
 
   for (const tone of Object.keys(TONES)) {
     const cleaned = cleanPage(image, corners, { maxEdge: 1200, tone });
+    console.log(`tone ${tone.padEnd(7)} ink lost ${cleaned.inkLost === null ? "(forced)" : (cleaned.inkLost * 100).toFixed(2) + "%"}`);
     write(`${outDir}/${name}-3-${tone}.png`, cleaned);
   }
   console.log(`wrote      ${outDir}/${name}-*.png`);

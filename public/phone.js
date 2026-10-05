@@ -243,7 +243,7 @@ function drawPreview() {
 }
 
 const markTone = () => {
-  for (const name of ['soft', 'normal', 'bright']) {
+  for (const name of ['soft', 'normal', 'bright', 'text']) {
     $(`tone-${name}`).classList.toggle('chosen', name === tone);
   }
 };
@@ -416,7 +416,7 @@ $('done').onclick = finish;
 $('use-page').onclick = showPreview;
 $('send-page').onclick = sendThisPage;
 $('back-to-crop').onclick = () => { clearSay(); screen('crop'); };
-for (const name of ['soft', 'normal', 'bright']) $(`tone-${name}`).onclick = () => retone(name);
+for (const name of ['soft', 'normal', 'bright', 'text']) $(`tone-${name}`).onclick = () => retone(name);
 $('retake').onclick = () => { shot = null; preview = null; clearSay(); screen('ready'); };
 $('whole-photo').onclick = () => {
   shot.corners = frameOf(shot.image);

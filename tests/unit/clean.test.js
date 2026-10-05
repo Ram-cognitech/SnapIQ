@@ -10,7 +10,8 @@
 
 import { describe, expect, it } from 'vitest';
 import {
-  autoContrast, closing, detectPage, enhance, homography, localMax, luminance, otsu, outputSize, TONES,
+  autoContrast, closing, detectPage, enhance, homography, localMax, luminance, otsu, outputSize,
+  pickPunch, softCurve, TONES,
   polygonArea, removeShadow, warpPerspective, cleanPage,
 } from '../../public/clean.js';
 
@@ -352,5 +353,139 @@ describe('a hard shadow across the page', () => {
     // The closing puts it back.
     expect(at(closed, 64)).toBe(90);
     expect(at(closed, 56)).toBe(220);
+  });
+});
+
+describe('the curve, and the guard that stops it erasing anything', () => {
+  it('rounds both ends and never leaves the range', () => {
+    for (const punch of [0, 1, 2, 3]) {
+      expect(softCurve(0.2, 0.3, 1, punch)).toBe(0);        // below the ink point
+      expect(softCurve(1.5, 0.3, 1, punch)).toBe(1);        // above the paper point
+      let previous = -1;
+      for (let t = 0; t <= 1.2; t += 0.02) {
+        const value = softCurve(t, 0.3, 1, punch);
+        expect(value).toBeGreaterThanOrEqual(previous);      // never goes backwards
+        expect(value).toBeGreaterThanOrEqual(0);
+        expect(value).toBeLessThanOrEqual(1);
+        previous = value;
+      }
+    }
+  });
+
+  it('backs the curve off when faint writing would be lost', () => {
+    // A histogram standing for a page whose writing is only a little darker
+    // than its paper - a pencil, or a faded print.
+    const BUCKETS = 1024;
+    const histogram = new Uint32Array(BUCKETS);
+    const put = (ratio, count) => { histogram[Math.round(ratio * (BUCKETS / 2))] += count; };
+    put(1.0, 50_000);      // paper
+    put(0.78, 4_000);      // faint writing, just under the ink cut
+
+    const faint = pickPunch({ histogram, BUCKETS, paperRatio: 1, low: 0.3, paperPoint: 0.96, paper: 255 });
+    expect(faint.lost).toBeLessThanOrEqual(0.02);
+
+    // The same page with solid black writing can take the strongest curve.
+    const solid = new Uint32Array(BUCKETS);
+    solid[Math.round(1.0 * (BUCKETS / 2))] = 50_000;
+    solid[Math.round(0.25 * (BUCKETS / 2))] = 4_000;
+    const dark = pickPunch({ histogram: solid, BUCKETS, paperRatio: 1, low: 0.2, paperPoint: 0.96, paper: 255 });
+    expect(dark.punch).toBeGreaterThanOrEqual(faint.punch);
+    expect(dark.lost).toBe(0);
+  });
+
+  it('reports how much it lost, so the number can be shown rather than trusted', () => {
+    const width = 220;
+    const height = 260;
+    const data = new Uint8ClampedArray(width * height * 4);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const writing = y % 18 < 3;
+        const value = writing ? 120 : 205;
+        const i = (y * width + x) * 4;
+        data[i] = data[i + 1] = data[i + 2] = value;
+        data[i + 3] = 255;
+      }
+    }
+    const page = enhance({ data, width, height });
+    expect(typeof page.inkLost).toBe('number');
+    expect(page.inkLost).toBeLessThanOrEqual(0.02);
+  });
+
+  it('keeps pencil-grey writing after the strongest tone, not just black ink', () => {
+    const width = 240;
+    const height = 300;
+    const data = new Uint8ClampedArray(width * height * 4);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        // 150 on 210 paper: the sort of mark a hard pencil leaves.
+        const writing = y % 20 < 3 && x > 20 && x < width - 20;
+        const value = writing ? 150 : 210;
+        const i = (y * width + x) * 4;
+        data[i] = data[i + 1] = data[i + 2] = value;
+        data[i + 3] = 255;
+      }
+    }
+    const page = enhance({ data, width, height }, TONES.text);
+    const gray = luminance(page);
+    const paper = gray.data[10 * width + 120];
+    const pencil = gray.data[1 * width + 120];
+    expect(paper).toBeGreaterThan(235);
+    // Still clearly there: the guard exists to stop this becoming paper.
+    expect(pencil).toBeLessThan(215);
+    expect(paper - pencil).toBeGreaterThan(25);
+  });
+});
+
+describe('flattening the paper without touching the writing', () => {
+  const mottled = (width = 200, height = 200) => {
+    const data = new Uint8ClampedArray(width * height * 4);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const writing = y % 24 < 4 && x > 30 && x < width - 30;
+        // Paper with a few levels of sensor mottle on it.
+        const noise = ((x * 7 + y * 13) % 5) - 2;
+        const value = writing ? 60 : 208 + noise;
+        const i = (y * width + x) * 4;
+        data[i] = data[i + 1] = data[i + 2] = value;
+        data[i + 3] = 255;
+      }
+    }
+    return { data, width, height };
+  };
+
+  const spread = (image, y, from, to) => {
+    const gray = luminance(image);
+    let min = 255;
+    let max = 0;
+    for (let x = from; x < to; x++) {
+      const v = gray.data[y * image.width + x];
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+    return max - min;
+  };
+
+  it('takes the mottle out of the paper', () => {
+    const page = mottled();
+    const before = spread(page, 12, 60, 140);
+    const after = spread(enhance(page), 12, 60, 140);
+    expect(before).toBeGreaterThan(2);
+    expect(after).toBeLessThanOrEqual(before);
+  });
+
+  it('leaves the edge of the writing sharp rather than smoothing it away', () => {
+    const page = enhance(mottled());
+    const gray = luminance(page);
+    // Down a column, crossing from paper into a line of writing.
+    const paper = gray.data[22 * page.width + 100];
+    const ink = gray.data[1 * page.width + 100];
+    expect(paper - ink).toBeGreaterThan(120);
+  });
+
+  it('can be switched off', () => {
+    const page = mottled();
+    const plain = enhance(page, { denoise: false, sharpen: 0 });
+    expect(plain.width).toBe(page.width);
+    expect(plain.height).toBe(page.height);
   });
 });
