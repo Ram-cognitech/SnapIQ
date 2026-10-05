@@ -1,0 +1,16 @@
+SnapIQ
+Copyright 2026 CogniTech Studio
+
+This product includes DocQuadNet-256, a document corner detection model from
+MakeACopy (https://github.com/egdels/makeacopy), used unmodified under the
+Apache License, Version 2.0.
+
+  Copyright the MakeACopy authors
+  Licensed under the Apache License, Version 2.0
+  http://www.apache.org/licenses/LICENSE-2.0
+
+The model takes a 256x256 RGB image and returns four corner heatmaps and a
+page mask. Everything SnapIQ does with that output - choosing the quarter
+turn, fitting the page's edges, walking out to where the sheet ends, the
+gradient check, and the straightening and cleaning that follow - is SnapIQ's
+own work.
