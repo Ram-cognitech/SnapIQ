@@ -13,6 +13,12 @@
     :root:not([data-theme="light"]) { --bg:#14161a; --card:#1c1f25; --ink:#f2f4f7; --muted:#99a0ad; --line:#2b2f37; --accent:#8aa2ff; --ok:#4ade9b; --bad:#ff8d7e; }
   }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  /* Dragging a corner must not also select the text around it, which is what
+     a touch-drag over a canvas otherwise starts doing. Nothing on this page
+     is meant to be selected. */
+  body, .stage, canvas, button {
+    -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+  }
   body {
     margin:0; background:var(--bg); color:var(--ink); min-height:100vh; padding:16px;
     font:17px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;

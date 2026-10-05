@@ -239,6 +239,9 @@ const pointerAt = (event) => {
 
 function grab(event) {
   if (!shot) return;
+  // Always, not only when a handle is caught: a touch that misses still
+  // starts a selection otherwise.
+  event.preventDefault();
   const { x, y, scale } = pointerAt(event);
   let nearest = -1;
   let best = Infinity;
