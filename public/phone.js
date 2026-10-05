@@ -10,6 +10,7 @@
 
 import { cleanPage, detectPage, MAX_LONG_EDGE } from './clean.js';
 import { buildPdf } from './pdf.js';
+import { sha256Hex, uuid } from './digest.js';
 
 const DECODE_LONG_EDGE = 4000;    // ~12 MP: enough that a cropped page still reaches 300 DPI
 const QUALITY = 0.85;
@@ -43,8 +44,6 @@ const api = async (path, { method = 'GET', body, token = deviceKey } = {}) => {
   return { status: response.status, body: parsed };
 };
 
-const hex = (buffer) => [...new Uint8Array(buffer)].map((b) => b.toString(16).padStart(2, '0')).join('');
-const digestOf = async (bytes) => hex(await crypto.subtle.digest('SHA-256', bytes));
 
 const say = (text, kind = 'ok') => {
   const note = $('note');
@@ -261,12 +260,12 @@ async function encode({ data, width, height }) {
 }
 
 async function upload(bytes) {
-  const digest = await digestOf(bytes);
+  const digest = await sha256Hex(bytes);
 
   if (!scanId) {
     const started = await api('/v1/scans', {
       method: 'POST',
-      body: { channel_id: channelId, idempotency_key: crypto.randomUUID() },
+      body: { channel_id: channelId, idempotency_key: uuid() },
     });
     if (started.status === 401) return unlink();
     if (started.status !== 201) throw new Error(started.body?.detail ?? 'could not start the document');
@@ -275,7 +274,7 @@ async function upload(bytes) {
 
   const asked = await api(`/v1/scans/${scanId}/pages`, {
     method: 'POST',
-    body: { bytes: bytes.length, content_type: 'image/jpeg', sha256: digest, idempotency_key: crypto.randomUUID() },
+    body: { bytes: bytes.length, content_type: 'image/jpeg', sha256: digest, idempotency_key: uuid() },
   });
   if (asked.status !== 201) throw new Error(asked.body?.detail ?? 'could not add the page');
 
@@ -300,11 +299,11 @@ async function finish() {
 
   try {
     const pdf = buildPdf(pages);
-    const digest = await digestOf(pdf);
+    const digest = await sha256Hex(pdf);
 
     const asked = await api(`/v1/scans/${scanId}/document`, {
       method: 'POST',
-      body: { bytes: pdf.length, sha256: digest, idempotency_key: crypto.randomUUID() },
+      body: { bytes: pdf.length, sha256: digest, idempotency_key: uuid() },
     });
     if (asked.status !== 201) throw new Error(asked.body?.detail ?? 'could not send the document');
 

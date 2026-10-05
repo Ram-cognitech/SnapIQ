@@ -11,7 +11,8 @@
     "test:local": "node scripts/test-local.mjs",
     "test:watch": "vitest",
     "dev:lan": "wrangler dev --ip 0.0.0.0",
-    "icons": "node scripts/icons.mjs"
+    "icons": "node scripts/icons.mjs",
+    "dev:https": "wrangler dev --ip 0.0.0.0 --local-protocol https"
   },
   "devDependencies": {
     "vitest": "^5.0.3",

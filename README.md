@@ -45,6 +45,12 @@ npm run dev                                        # http://127.0.0.1:8787
 npm run test:local
 ```
 
+Over plain http - a phone talking to a laptop by its address - the browser withholds
+`crypto.subtle` and `crypto.randomUUID`, which exist only in a secure context. `public/digest.js`
+falls back to its own SHA-256 so that works anyway. Installing the app to a home screen and the
+Android share target do need a certificate, so for those use `npm run dev:https` and accept the
+warning once on the phone.
+
 `.dev.vars` holds the two local secrets (`OPERATOR_PASSPHRASE`, `SESSION_SECRET`) and is not
 committed. For a deployment they are set with `wrangler secret put`.
 
