@@ -106,7 +106,7 @@ async function took(file) {
     // No page found is a real answer: the whole frame is offered instead of a
     // confident wrong crop, and the corners can be dragged.
     const found = detectPage(image);
-    shot = { image, corners: found ?? frameOf(image), detected: Boolean(found) };
+    shot = { image, corners: found ?? frameOf(image), detected: Boolean(found), canvas: null };
     drawCrop();
     screen('crop');
     say(shot.detected ? 'Drag a corner if the edges are wrong.' : 'No page found — drag the corners to its edges.',
@@ -123,6 +123,68 @@ const frameOf = (image) => [
 
 // --- the crop you can correct ---------------------------------------------
 
+// The photograph on a canvas, made once and kept.
+//
+// It was being rebuilt on every pointer event, which pushed twelve megapixels
+// through putImageData for each pixel of finger movement and made dragging a
+// corner crawl. Nothing about the photo changes while it is being cropped.
+// A plain canvas rather than an OffscreenCanvas: this has to work on an older
+// iPhone, and once is not hot enough to need the faster one.
+function sourceCanvas() {
+  if (shot.canvas) return shot.canvas;
+  const canvas = document.createElement('canvas');
+  canvas.width = shot.image.width;
+  canvas.height = shot.image.height;
+  canvas.getContext('2d').putImageData(shot.image, 0, 0);
+  shot.canvas = canvas;
+  return canvas;
+}
+
+// A magnified view of what is under the finger, drawn away from it.
+//
+// Placing a corner by touch is otherwise guesswork: the fingertip covers the
+// exact spot being aimed at. The loupe goes to whichever side of the picture
+// the finger is not on, so it never ends up under the hand either.
+function showLoupe(corner) {
+  const loupe = $('loupe');
+  const size = loupe.width;                 // the drawing buffer, 320
+  const zoom = 4;
+  const span = size / zoom;                 // how much of the photo is shown
+
+  const context = loupe.getContext('2d');
+  context.fillStyle = '#fff';
+  context.fillRect(0, 0, size, size);
+  context.drawImage(
+    sourceCanvas(),
+    corner[0] - span / 2, corner[1] - span / 2, span, span,
+    0, 0, size, size
+  );
+
+  // Crosshair, so the exact point is visible rather than implied.
+  context.strokeStyle = '#3b5bdb';
+  context.lineWidth = 3;
+  context.beginPath();
+  context.moveTo(size / 2, size / 2 - 26);
+  context.lineTo(size / 2, size / 2 + 26);
+  context.moveTo(size / 2 - 26, size / 2);
+  context.lineTo(size / 2 + 26, size / 2);
+  context.stroke();
+  context.beginPath();
+  context.arc(size / 2, size / 2, 9, 0, Math.PI * 2);
+  context.stroke();
+
+  // Opposite side to the finger, horizontally and vertically.
+  const onLeft = corner[0] / shot.image.width < 0.5;
+  const onTop = corner[1] / shot.image.height < 0.5;
+  loupe.style.left = onLeft ? 'auto' : '10px';
+  loupe.style.right = onLeft ? '10px' : 'auto';
+  loupe.style.top = onTop ? 'auto' : '10px';
+  loupe.style.bottom = onTop ? '10px' : 'auto';
+  loupe.classList.remove('hidden');
+}
+
+const hideLoupe = () => $('loupe').classList.add('hidden');
+
 function drawCrop() {
   const canvas = $('crop-canvas');
   const { image, corners } = shot;
@@ -132,14 +194,7 @@ function drawCrop() {
   canvas.height = Math.round(image.height * scale);
 
   const context = canvas.getContext('2d');
-  // The photo, at screen size. A plain canvas rather than an OffscreenCanvas:
-  // this has to work on an older iPhone, and nothing here is hot enough to
-  // need the faster one.
-  const source = document.createElement('canvas');
-  source.width = image.width;
-  source.height = image.height;
-  source.getContext('2d').putImageData(image, 0, 0);
-  context.drawImage(source, 0, 0, canvas.width, canvas.height);
+  context.drawImage(sourceCanvas(), 0, 0, canvas.width, canvas.height);
 
   const at = ([x, y]) => [x * scale, y * scale];
 
@@ -194,6 +249,7 @@ function grab(event) {
   if (best <= HANDLE_GRAB) {
     dragging = nearest;
     $('crop-canvas').setPointerCapture?.(event.pointerId);
+    showLoupe(shot.corners[nearest]);
     event.preventDefault();
   }
 }
@@ -206,10 +262,11 @@ function drag(event) {
     Math.max(0, Math.min(shot.image.height - 1, Math.round(y))),
   ];
   drawCrop();
+  showLoupe(shot.corners[dragging]);
   event.preventDefault();
 }
 
-const release = () => { dragging = -1; };
+const release = () => { dragging = -1; hideLoupe(); };
 
 // --- cleaning and sending -------------------------------------------------
 
@@ -417,7 +474,7 @@ $('use-page').onclick = showPreview;
 $('send-page').onclick = sendThisPage;
 $('back-to-crop').onclick = () => { clearSay(); screen('crop'); };
 for (const name of ['soft', 'normal', 'bright', 'text']) $(`tone-${name}`).onclick = () => retone(name);
-$('retake').onclick = () => { shot = null; preview = null; clearSay(); screen('ready'); };
+$('retake').onclick = () => { shot = null; preview = null; hideLoupe(); clearSay(); screen('ready'); };
 $('whole-photo').onclick = () => {
   shot.corners = frameOf(shot.image);
   shot.detected = false;

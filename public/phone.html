@@ -40,6 +40,12 @@
   .hidden { display:none !important; }
   .row { display:flex; gap:10px; }
   .row button { margin-bottom:0; }
+  .stage { position:relative; margin-bottom:14px; }
+  .loupe {
+    position:absolute; width:116px; height:116px; border-radius:50%;
+    border:3px solid var(--card); box-shadow:0 4px 18px rgba(0,0,0,.45);
+    pointer-events:none; background:var(--card); z-index:5;
+  }
   button.chosen { border-color:var(--accent); color:var(--accent); background:color-mix(in srgb, var(--accent) 12%, transparent); }
   .working { display:flex; gap:12px; align-items:center; justify-content:center; font-weight:600; color:var(--accent); min-height:120px; }
   .spinner {
@@ -82,7 +88,12 @@
 
   <!-- The crop, which can be corrected: an automatic guess is offered, never imposed. -->
   <section id="crop" class="hidden">
-    <canvas id="crop-canvas" style="width:100%;border-radius:14px;touch-action:none;display:block;margin-bottom:14px"></canvas>
+    <div class="stage">
+      <canvas id="crop-canvas" style="width:100%;border-radius:14px;touch-action:none;display:block"></canvas>
+      <!-- A magnified view of whatever is under the finger, placed away from it:
+           the thing you are aiming at is the thing your fingertip covers. -->
+      <canvas id="loupe" class="loupe hidden" width="320" height="320"></canvas>
+    </div>
     <button id="use-page">Straighten and send</button>
     <div class="row">
       <button id="whole-photo" class="second small">Whole photo</button>
