@@ -10,7 +10,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
-  autoContrast, detectPage, homography, luminance, otsu, outputSize,
+  autoContrast, detectPage, enhance, homography, luminance, otsu, outputSize, TONES,
   polygonArea, removeShadow, warpPerspective, cleanPage,
 } from '../../public/clean.js';
 
@@ -200,5 +200,77 @@ describe('the whole job', () => {
     const square = [[0, 0], [10, 0], [10, 10], [0, 10]];
     expect(polygonArea(square)).toBe(100);
     expect(polygonArea([...square].reverse())).toBe(100);
+  });
+});
+
+describe('setting the tone in one pass', () => {
+  // A page with faint grey writing on it, lit from one side: the two cases that
+  // the old two-step version got wrong, which is why these exist.
+  const faintPage = (width = 240, height = 320, { ink = 150, paper = 205, falloff = 0.5 } = {}) => {
+    const data = new Uint8ClampedArray(width * height * 4);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const writing = y % 24 < 4 && x > width * 0.1 && x < width * 0.9;
+        const value = (writing ? ink : paper) * (1 - falloff * (x / width));
+        const i = (y * width + x) * 4;
+        data[i] = data[i + 1] = data[i + 2] = value;
+        data[i + 3] = 255;
+      }
+    }
+    return { data, width, height };
+  };
+
+  it('lands clean paper under white, instead of bleaching it', () => {
+    const page = enhance(faintPage());
+    const gray = luminance(page);
+    // y = 12 is between two lines of writing, so it is paper.
+    const left = gray.data[12 * page.width + 30];
+    const right = gray.data[12 * page.width + 210];
+    for (const value of [left, right]) {
+      expect(value).toBeGreaterThan(215);
+      // The old version pushed this to 255 on both sides and took the faint
+      // writing with it.
+      expect(value).toBeLessThanOrEqual(252);
+    }
+  });
+
+  it('evens out the lighting across the page', () => {
+    const page = enhance(faintPage());
+    const gray = luminance(page);
+    const left = gray.data[12 * page.width + 30];
+    const right = gray.data[12 * page.width + 210];
+    expect(Math.abs(left - right)).toBeLessThan(14);
+  });
+
+  it('keeps faint writing visible rather than washing it out', () => {
+    const page = enhance(faintPage());
+    const gray = luminance(page);
+    const paperAt = (x) => gray.data[12 * page.width + x];
+    const inkAt = (x) => gray.data[1 * page.width + x];
+    // Dark enough to read, on the dim side of the page as well as the bright.
+    for (const x of [30, 120, 210]) {
+      expect(inkAt(x), `ink at ${x}`).toBeLessThan(200);
+      expect(paperAt(x) - inkAt(x), `contrast at ${x}`).toBeGreaterThan(30);
+    }
+  });
+
+  it('is brighter or softer on request, and ordered the way the names say', () => {
+    const middle = (tone) => {
+      const page = enhance(faintPage(), TONES[tone]);
+      return luminance(page).data[12 * page.width + 120];
+    };
+    expect(middle('soft')).toBeLessThan(middle('normal'));
+    expect(middle('normal')).toBeLessThan(middle('bright'));
+  });
+
+  it('does not eat the writing by mistaking it for shadow', () => {
+    // A radius so small that the blur follows the lines of text would flatten
+    // them away. The default must be well clear of that.
+    const page = enhance(faintPage(), { radius: 0.12 });
+    const gray = luminance(page);
+    const rows = [];
+    for (let y = 0; y < 48; y++) rows.push(gray.data[y * page.width + 120]);
+    // There should still be a clear swing between the lines and the gaps.
+    expect(Math.max(...rows) - Math.min(...rows)).toBeGreaterThan(30);
   });
 });

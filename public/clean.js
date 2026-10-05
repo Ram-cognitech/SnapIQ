@@ -392,16 +392,103 @@ export function autoContrast(image, { low = 0.01, high = 0.995 } = {}) {
   return out;
 }
 
+// --- 3 and 4 together ------------------------------------------------------
+
+// Flatten the lighting and set the tone in one pass.
+//
+// Doing it in two - normalise the paper to white, then stretch the histogram to
+// full range - brightens the page twice. The paper ends up blown out and the
+// light grey of a pencil or a faded print is pushed into the white with it.
+// This is the bug that made the first version come out "too bright".
+//
+// So: divide by the slow-changing brightness to take the room's shadow off,
+// then land the paper a little under white and bend the mid-tones down, which
+// is what keeps grey writing grey instead of losing it.
+//
+//   paper   where clean paper lands. Below 255 on purpose: it leaves the
+//           texture of the sheet visible and keeps headroom, which is what
+//           stops the page looking bleached.
+//   gamma   above 1 darkens the mid-tones - the faint writing that a plain
+//           stretch erases.
+//   floor   how much of the dark end may be crushed to black, at most.
+//   radius  how slowly the lighting is assumed to change. Too small and the
+//           writing is read as shadow and eaten.
+export function enhance(image, { paper = 242, gamma = 1.15, floor = 0.55, radius = 0.12, strength = 1 } = {}) {
+  const { data, width, height } = image;
+  const gray = luminance(image);
+  const small = shrinkGray(gray, 96);
+  const background = boxBlur(small, Math.max(3, Math.round(Math.max(small.width, small.height) * radius)));
+
+  const sx = small.width / width;
+  const sy = small.height / height;
+  const backgroundAt = (x, y) =>
+    Math.max(24, background.data[Math.min(small.height - 1, (y * sy) | 0) * small.width + Math.min(small.width - 1, (x * sx) | 0)]);
+
+  // How bright each pixel is compared with the lighting around it. Paper comes
+  // out near 1 wherever it is in the frame; ink comes out well below.
+  const BUCKETS = 1024;
+  const histogram = new Uint32Array(BUCKETS);
+  const ratioOf = (x, y) => gray.data[y * width + x] / backgroundAt(x, y);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const bucket = Math.min(BUCKETS - 1, (ratioOf(x, y) * (BUCKETS / 2)) | 0);
+      histogram[bucket]++;
+    }
+  }
+  const at = (fraction) => {
+    const wanted = width * height * fraction;
+    let seen = 0;
+    for (let b = 0; b < BUCKETS; b++) {
+      seen += histogram[b];
+      if (seen >= wanted) return b / (BUCKETS / 2);
+    }
+    return 1;
+  };
+
+  const paperRatio = Math.max(0.2, at(0.92));
+  const inkRatio = at(0.02);
+  // Never crush more of the dark end than `floor`, or a page with no real ink
+  // on it loses what little it has.
+  const low = Math.min(floor, Math.max(0, inkRatio / paperRatio));
+
+  const out = { data: new Uint8ClampedArray(data.length), width, height };
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const luma = gray.data[y * width + x];
+      const normalised = (ratioOf(x, y) / paperRatio - low) / (1 - low);
+      const curved = Math.pow(Math.min(1, Math.max(0, normalised)), gamma);
+      const target = curved * paper;
+      // Applied as a gain so colour survives: a red stamp stays red.
+      const gain = (target / Math.max(1, luma)) * strength + (1 - strength);
+      const i = (y * width + x) * 4;
+      out.data[i] = data[i] * gain;
+      out.data[i + 1] = data[i + 1] * gain;
+      out.data[i + 2] = data[i + 2] * gain;
+      out.data[i + 3] = 255;
+    }
+  }
+  return out;
+}
+
 // --- the whole job ---------------------------------------------------------
 
 // corners: pass what detectPage found, or what the person dragged to. Pass
 // null and the whole frame is used.
-export function cleanPage(image, corners = null, { maxEdge = MAX_LONG_EDGE } = {}) {
+// How bright the finished page should be. "normal" is the default; the other
+// two exist because the right answer depends on the paper and the light, and
+// the person holding the phone can see which it is.
+export const TONES = {
+  soft:   { paper: 230, gamma: 1.3 },
+  normal: { paper: 242, gamma: 1.15 },
+  bright: { paper: 252, gamma: 1 },
+};
+
+export function cleanPage(image, corners = null, { maxEdge = MAX_LONG_EDGE, tone = 'normal' } = {}) {
   // With no corners there is nothing to straighten, so the warp is skipped
   // rather than run on the whole frame: it would resample every pixel for no
   // gain and cost the image a little sharpness. The caller caps the size.
   const straightened = corners
     ? warpPerspective(image, corners, outputSize(corners, maxEdge)) ?? image
     : image;
-  return autoContrast(removeShadow(straightened));
+  return enhance(straightened, TONES[tone] ?? TONES.normal);
 }

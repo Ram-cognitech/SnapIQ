@@ -27,6 +27,10 @@ let scanId = null;
 let pages = [];            // { jpeg, width, height } for the PDF
 let shot = null;           // { image, corners } awaiting confirmation
 let dragging = -1;
+let tone = 'normal';       // remembered between pages: the light rarely changes
+let preview = null;        // the cleaned page, small, for looking at
+
+const PREVIEW_EDGE = 900;  // big enough to judge, small enough to redo instantly
 
 // --- talking to the API ---------------------------------------------------
 
@@ -209,15 +213,58 @@ const release = () => { dragging = -1; };
 
 // --- cleaning and sending -------------------------------------------------
 
-async function useThisPage() {
+const cropCorners = () => (shot.detected || moved() ? shot.corners : null);
+
+// Straighten and clean a small copy, which is quick enough to redo every time
+// the tone is changed. The full-size version is only made once, on send.
+async function showPreview() {
   if (!shot) return;
   screen('busy');
   $('busy-text').textContent = 'Straightening and cleaning…';
-  // Let the browser paint that before the work begins.
   await new Promise((resolve) => setTimeout(resolve, 16));
 
   try {
-    const cleaned = cleanPage(shot.image, shot.detected || moved() ? shot.corners : null, { maxEdge: MAX_LONG_EDGE });
+    preview = cleanPage(shot.image, cropCorners(), { maxEdge: PREVIEW_EDGE, tone });
+    drawPreview();
+    markTone();
+    screen('review');
+    clearSay();
+  } catch (error) {
+    screen('crop');
+    say(error.message || 'That page could not be cleaned.', 'bad');
+  }
+}
+
+function drawPreview() {
+  const canvas = $('review-canvas');
+  canvas.width = preview.width;
+  canvas.height = preview.height;
+  canvas.getContext('2d').putImageData(new ImageData(preview.data, preview.width, preview.height), 0, 0);
+}
+
+const markTone = () => {
+  for (const name of ['soft', 'normal', 'bright']) {
+    $(`tone-${name}`).classList.toggle('chosen', name === tone);
+  }
+};
+
+async function retone(which) {
+  tone = which;
+  markTone();
+  // Small enough that this is near-instant, so it feels like a control rather
+  // than a round trip.
+  preview = cleanPage(shot.image, cropCorners(), { maxEdge: PREVIEW_EDGE, tone });
+  drawPreview();
+}
+
+async function sendThisPage() {
+  if (!shot) return;
+  screen('busy');
+  $('busy-text').textContent = 'Cleaning at full size…';
+  await new Promise((resolve) => setTimeout(resolve, 16));
+
+  try {
+    const cleaned = cleanPage(shot.image, cropCorners(), { maxEdge: MAX_LONG_EDGE, tone });
     const blob = await encode(cleaned);
     const bytes = new Uint8Array(await blob.arrayBuffer());
 
@@ -227,13 +274,14 @@ async function useThisPage() {
     pages.push({ jpeg: bytes, width: cleaned.width, height: cleaned.height });
     addThumb(blob);
     shot = null;
+    preview = null;
     screen('ready');
     say(pages.length === 1 ? 'Page sent. It is on your computer.' : `${pages.length} pages sent.`);
     $('take-label').textContent = 'Add another page';
     $('done').classList.remove('hidden');
     $('hint').textContent = 'Add more pages, or press Done to finish the document.';
   } catch (error) {
-    screen('crop');
+    screen('review');
     say(error.message || 'That did not work. Try again.', 'bad');
   }
 }
@@ -355,7 +403,7 @@ function unlink() {
 // --- which screen ---------------------------------------------------------
 
 function screen(which) {
-  for (const name of ['unpaired', 'ready', 'crop', 'busy']) {
+  for (const name of ['unpaired', 'ready', 'crop', 'review', 'busy']) {
     $(name).classList.toggle('hidden', name !== which);
   }
 }
@@ -365,8 +413,11 @@ function screen(which) {
 $('take').onclick = () => $('camera').click();
 $('choose').onclick = () => $('gallery').click();
 $('done').onclick = finish;
-$('use-page').onclick = useThisPage;
-$('retake').onclick = () => { shot = null; clearSay(); screen('ready'); };
+$('use-page').onclick = showPreview;
+$('send-page').onclick = sendThisPage;
+$('back-to-crop').onclick = () => { clearSay(); screen('crop'); };
+for (const name of ['soft', 'normal', 'bright']) $(`tone-${name}`).onclick = () => retone(name);
+$('retake').onclick = () => { shot = null; preview = null; clearSay(); screen('ready'); };
 $('whole-photo').onclick = () => {
   shot.corners = frameOf(shot.image);
   shot.detected = false;

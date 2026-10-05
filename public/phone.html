@@ -40,6 +40,7 @@
   .hidden { display:none !important; }
   .row { display:flex; gap:10px; }
   .row button { margin-bottom:0; }
+  button.chosen { border-color:var(--accent); color:var(--accent); background:color-mix(in srgb, var(--accent) 12%, transparent); }
   .working { display:flex; gap:12px; align-items:center; justify-content:center; font-weight:600; color:var(--accent); min-height:120px; }
   .spinner {
     width:22px; height:22px; border-radius:50%; flex:0 0 auto;
@@ -87,6 +88,19 @@
       <button id="whole-photo" class="second small">Whole photo</button>
       <button id="retake" class="second small">Retake</button>
     </div>
+  </section>
+
+  <!-- The cleaned page, before it is sent. The right brightness depends on the
+       paper and the light, and the person holding the phone can see which. -->
+  <section id="review" class="hidden">
+    <canvas id="review-canvas" style="width:100%;border-radius:14px;display:block;margin-bottom:12px;background:#fff"></canvas>
+    <div class="row" style="margin-bottom:12px">
+      <button id="tone-soft" class="second small">Softer</button>
+      <button id="tone-normal" class="second small">Normal</button>
+      <button id="tone-bright" class="second small">Brighter</button>
+    </div>
+    <button id="send-page">Send this page</button>
+    <button id="back-to-crop" class="second small">Back to the crop</button>
   </section>
 
   <section id="busy" class="hidden">
