@@ -18,3 +18,4 @@ tmp*
 
 # The corner model, fetched with `npm run model` (Apache-2.0, see NOTICE).
 models/
+public/models/

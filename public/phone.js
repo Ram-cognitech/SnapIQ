@@ -8,13 +8,15 @@
 // Drawing the photo through a canvas is also what strips the camera's metadata,
 // so the location it was taken at never leaves the phone.
 
-import { cleanPage, detectPage, MAX_LONG_EDGE } from './clean.js';
+import { cleanPage, detectPage, orderCorners, refineCorners, MAX_LONG_EDGE } from './clean.js';
+import { detectCorners, warmUp } from './detect.js';
 import { buildPdf } from './pdf.js';
 import { sha256Hex, uuid } from './digest.js';
 
 const DECODE_LONG_EDGE = 4000;    // ~12 MP: enough that a cropped page still reaches 300 DPI
 const QUALITY = 0.85;
 const HANDLE_GRAB = 28;           // how close a thumb has to be, in CSS pixels
+const MIN_CONFIDENCE = 0.5;       // below this the model is guessing, and says so
 
 const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
@@ -103,10 +105,14 @@ async function took(file) {
   $('busy-text').textContent = 'Looking for the page…';
   try {
     const image = await toImageData(file);
+    shot = { image, corners: frameOf(image), detected: false, canvas: null };
+
+    const found = await findPage(image);
     // No page found is a real answer: the whole frame is offered instead of a
     // confident wrong crop, and the corners can be dragged.
-    const found = detectPage(image);
-    shot = { image, corners: found ?? frameOf(image), detected: Boolean(found), canvas: null };
+    shot.corners = found ?? frameOf(image);
+    shot.detected = Boolean(found);
+
     drawCrop();
     screen('crop');
     say(shot.detected ? 'Drag a corner if the edges are wrong.' : 'No page found — drag the corners to its edges.',
@@ -120,6 +126,33 @@ async function took(file) {
 const frameOf = (image) => [
   [0, 0], [image.width - 1, 0], [image.width - 1, image.height - 1], [0, image.height - 1],
 ];
+
+// The model first, the brightness detector second, and the edges fitted to
+// whichever answered.
+//
+// The brightness detector cannot separate a page from another page touching
+// it, and a hard shadow puts much of the sheet below its threshold, so on a
+// real desk it usually declines. The model copes with both. Neither is trusted
+// blindly: the corners are put onto the page's own edges afterwards, and the
+// person can still drag them.
+async function findPage(image) {
+  $('busy-text').textContent = 'Looking for the page…';
+  try {
+    const model = await detectCorners(sourceCanvas(), image);
+    if (model && model.mean >= MIN_CONFIDENCE) {
+      // The quarter turn is taken from the model and the half turn ignored: it
+      // locates corners, it cannot read, so it does not know up from down.
+      const ordered = orderCorners(model.corners);
+      const shift = model.turns % 2 ? model.turns % 4 : 0;
+      const turned = shift ? [...ordered.slice(shift), ...ordered.slice(0, shift)] : ordered;
+      return refineCorners(image, turned);
+    }
+  } catch {
+    // Any trouble at all and we carry on without it.
+  }
+  const found = detectPage(image);
+  return found ? refineCorners(image, found) : null;
+}
 
 // --- the crop you can correct ---------------------------------------------
 
@@ -502,3 +535,7 @@ const claim = params.get('t');
 if (claim && !deviceKey) await pair(claim);
 else if (claim) stripClaimFromUrl();
 screen(deviceKey ? 'ready' : 'unpaired');
+
+// Start fetching the model now, so the wait does not land on the person who
+// has just taken a photograph. Failure here is silent and harmless.
+if (deviceKey) warmUp();
