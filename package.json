@@ -12,7 +12,9 @@
     "test:watch": "vitest",
     "dev:lan": "wrangler dev --ip 0.0.0.0",
     "icons": "node scripts/icons.mjs",
-    "dev:https": "wrangler dev --ip 0.0.0.0 --local-protocol https"
+    "dev:https": "wrangler dev --ip 0.0.0.0 --local-protocol https",
+    "model": "node scripts/model.mjs",
+    "scan": "node scripts/try.mjs"
   },
   "devDependencies": {
     "jpeg-js": "^0.4.4",

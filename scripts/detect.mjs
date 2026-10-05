@@ -16,7 +16,7 @@ import ort from 'onnxruntime-node';
 import jpeg from 'jpeg-js';
 import { orderCorners, refineCorners } from '../public/clean.js';
 
-const MODEL = 'tmp/model/docquadnet256.ort';
+const MODEL = 'models/docquadnet256.ort';
 const IN = 256;
 const OUT = 64;
 

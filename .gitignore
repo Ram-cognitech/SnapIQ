@@ -15,3 +15,6 @@ tmp*
 *.jpg
 *.jpeg
 !public/icon-*.png
+
+# The corner model, fetched with `npm run model` (Apache-2.0, see NOTICE).
+models/

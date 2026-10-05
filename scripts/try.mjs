@@ -14,10 +14,11 @@ import { deflateSync } from 'node:zlib';
 import jpeg from 'jpeg-js';
 import {
   boxBlur, cleanPage, detectPage, enhance, localMax, luminance, otsu, outputSize, polygonArea,
+  refineCorners,
   shrinkGray, warpPerspective, TONES,
 } from '../public/clean.js';
 
-function main() {
+async function main() {
   const args = process.argv.slice(2);
   // Corners can be given instead of detected: --corners x1,y1 x2,y2 x3,y3 x4,y4
   // clockwise from the top-left. public/corners.html prints this line for you.
@@ -54,6 +55,22 @@ function main() {
     console.log(`           ${((polygonArea(found) / (image.width * image.height)) * 100).toFixed(1)}% of the frame`);
   }
 
+  // No corners given: find them. The model first, since it is the only thing
+  // that copes with a shadow, or with another sheet touching the page; the
+  // brightness detector only if the model is not here.
+  if (!given) {
+    try {
+      const { detectUpright } = await import('./detect.mjs');
+      const model = await detectUpright(image);
+      given = refineCorners(image, model.corners);
+      console.log(`model      ${model.turns * 90} degrees, in ${model.took} ms`);
+      console.log(`confidence ${model.confidence.map((c) => c.toFixed(2)).join(' ')}`);
+      console.log(`refined    ${given.map(([x, y]) => `(${x},${y})`).join(' ')}`);
+    } catch (error) {
+      console.log(`model      not available - ${String(error.message).split(String.fromCharCode(10))[0]}`);
+      console.log('           run: npm run model');
+    }
+  }
   const corners = given ?? found;
   if (given) {
     console.log(`given      ${given.map(([x, y]) => `(${x},${y})`).join(' ')}`);
@@ -217,4 +234,4 @@ function chunk(type, data) {
   return Buffer.concat([length, body, crc]);
 }
 
-main();
+await main();
