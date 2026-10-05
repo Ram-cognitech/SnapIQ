@@ -11,7 +11,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   autoContrast, closing, detectPage, enhance, homography, localMax, luminance, otsu, outputSize,
-  pickPunch, refineCorners, softCurve, TONES,
+  clearBorderStains, pickPunch, refineCorners, softCurve, TONES,
   polygonArea, removeShadow, warpPerspective, cleanPage,
 } from '../../public/clean.js';
 
@@ -565,5 +565,75 @@ describe('putting roughly-right corners onto the page', () => {
     const refined = refineCorners({ data, width, height }, off);
     // Within a few pixels of the page, not 25 out on the rim's outer edge.
     expect(away(refined, truth)).toBeLessThan(8);
+  });
+});
+
+describe('wiping out what is not the page', () => {
+  // A clean page with writing in the middle, and a stain at one edge, as a
+  // corner landing just outside the sheet leaves behind.
+  const stained = (width = 200, height = 260) => {
+    const data = new Uint8ClampedArray(width * height * 4);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const writing = y > 20 && y % 26 < 4 && x > 40 && x < width - 40;
+        const stain = x < 14 && y > 60 && y < 160;          // touching the left edge
+        const value = stain ? 40 : writing ? 50 : 252;
+        const i = (y * width + x) * 4;
+        data[i] = data[i + 1] = data[i + 2] = value;
+        data[i + 3] = 255;
+      }
+    }
+    return { data, width, height };
+  };
+
+  it('clears a dark patch that reaches the border', () => {
+    const page = stained();
+    const cleared = clearBorderStains(page);
+    const gray = luminance(cleared);
+    expect(gray.data[100 * page.width + 5]).toBeGreaterThan(240);
+  });
+
+  it('leaves the writing alone, because writing does not touch the border', () => {
+    const page = stained();
+    const before = luminance(page);
+    const after = luminance(clearBorderStains(page));
+    // y = 26 is a line of writing, clear of every edge.
+    expect(before.data[26 * page.width + 100]).toBeLessThan(100);
+    expect(after.data[26 * page.width + 100]).toBe(before.data[26 * page.width + 100]);
+  });
+
+  it('leaves a dark area that runs deep into the page', () => {
+    // Reaching the middle means it is something the page is made of - a
+    // photograph, a filled box - not something that leaked in at the side.
+    const width = 200;
+    const height = 200;
+    const data = new Uint8ClampedArray(width * height * 4).fill(252);
+    for (let i = 3; i < data.length; i += 4) data[i] = 255;
+    for (let y = 0; y < 120; y++) for (let x = 0; x < 30; x++) {
+      const i = (y * width + x) * 4;
+      data[i] = data[i + 1] = data[i + 2] = 40;
+    }
+    const page = { data, width, height };
+    const after = luminance(clearBorderStains(page));
+    expect(after.data[60 * width + 10]).toBeLessThan(100);
+  });
+
+  it('gives up on a page that is mostly dark rather than erasing it', () => {
+    const width = 160;
+    const height = 160;
+    const data = new Uint8ClampedArray(width * height * 4).fill(30);
+    for (let i = 3; i < data.length; i += 4) data[i] = 255;
+    const page = { data, width, height };
+    // A photograph, or a page printed dark: the fill would swallow all of it.
+    expect(clearBorderStains(page)).toBe(page);
+  });
+
+  it('does nothing when there is nothing at the edges', () => {
+    const width = 120;
+    const height = 120;
+    const data = new Uint8ClampedArray(width * height * 4).fill(252);
+    for (let i = 3; i < data.length; i += 4) data[i] = 255;
+    const page = { data, width, height };
+    expect(clearBorderStains(page)).toBe(page);
   });
 });

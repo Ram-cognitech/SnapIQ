@@ -533,7 +533,23 @@ export function refineCorners(image, quad, {
           leaving = 0;
         }
       }
-      if (at === null) continue;
+      // Nothing stopped looking like the page: this sheet is lying on other
+      // white sheets, and leaving it never shows. Fall back to the strongest
+      // edge, weighted towards where the page was thought to be so a boundary
+      // further out has to be clearly better to win. Second choice, because
+      // where the page visibly ends is the surer answer when it exists.
+      if (at === null) {
+        let best = 0;
+        for (let offset = -span; offset <= span; offset++) {
+          const px = Math.round(bx + nx * offset);
+          const py = Math.round(by + ny * offset);
+          if (px < 1 || py < 1 || px >= small.width - 1 || py >= small.height - 1) continue;
+          const nearness = Math.exp(-0.5 * (offset / (span * 0.6)) ** 2);
+          const score = gradient.data[py * small.width + px] * nearness;
+          if (score > best) { best = score; at = offset; }
+        }
+        if (at === null) continue;
+      }
 
       // The gradient decides the last pixel or two, where it is reliable
       // because we already know the edge is here.
@@ -1140,6 +1156,153 @@ function finish(image, { denoise, sharpen, paper }) {
   return { data: out, width, height, inkLost: image.inkLost };
 }
 
+// Wipe out what is not the page but got into the frame.
+//
+// A corner a little outside the sheet brings a sliver of desk, or of the sheet
+// underneath, into the straightened rectangle. It arrives as dark patches at
+// the edges and reads as a dirty border. Trimming whole rows cannot remove
+// them, because they are patches rather than bands, and cutting enough rows to
+// catch them would eat the page.
+//
+// What separates them from the document is simple: they touch the border, and
+// writing does not. So anything dark that can be reached from the edge is
+// flooded out to paper, and anything dark that cannot - every letter on the
+// page - is left exactly as it was.
+//
+// Two guards. The fill is abandoned if it grows past a share of the page,
+// which is what would happen on a dark page or a photograph that reaches the
+// edge; and a page whose own content runs into the border keeps it.
+export function clearBorderStains(image, { paper = 252, maxShare = 0.12 } = {}) {
+  const { data, width, height } = image;
+  const gray = luminance(image);
+  const notPaper = paper * 0.78;
+
+  // Each patch is judged on its own, not all of them together: one big dark
+  // area must not stop a small stain elsewhere being cleared, and a patch that
+  // reaches well into the page is something the page is made of rather than
+  // something that leaked in at the side.
+  const maxDepth = Math.round(Math.min(width, height) * 0.1);
+  const maxPixels = width * height * maxShare;
+
+  const seen = new Uint8Array(width * height);
+  const queue = new Int32Array(width * height);
+  const cleared = [];
+
+  const start = (seed) => {
+    if (seen[seed] || gray.data[seed] >= notPaper) return;
+    let head = 0;
+    let tail = 0;
+    seen[seed] = 1;
+    queue[tail++] = seed;
+    let deepest = 0;
+    let runaway = false;
+
+    while (head < tail) {
+      const index = queue[head++];
+      const x = index % width;
+      const y = (index - x) / width;
+      const depth = Math.min(x, y, width - 1 - x, height - 1 - y);
+      if (depth > deepest) deepest = depth;
+      if (deepest > maxDepth || tail > maxPixels) { runaway = true; break; }
+
+      const consider = (next) => {
+        if (!seen[next] && gray.data[next] < notPaper) { seen[next] = 1; queue[tail++] = next; }
+      };
+      if (x > 0) consider(index - 1);
+      if (x < width - 1) consider(index + 1);
+      if (y > 0) consider(index - width);
+      if (y < height - 1) consider(index + width);
+    }
+    // Everything reached stays marked either way, so a patch that was refused
+    // is not walked again from another point on the border.
+    if (!runaway) for (let i = 0; i < tail; i++) cleared.push(queue[i]);
+  };
+
+  for (let x = 0; x < width; x++) {
+    start(x);
+    start((height - 1) * width + x);
+  }
+  for (let y = 0; y < height; y++) {
+    start(y * width);
+    start(y * width + width - 1);
+  }
+  if (!cleared.length) return image;
+
+  const out = { data: new Uint8ClampedArray(data), width, height, inkLost: image.inkLost };
+  for (const index of cleared) {
+    const at = index * 4;
+    out.data[at] = paper;
+    out.data[at + 1] = paper;
+    out.data[at + 2] = paper;
+    out.data[at + 3] = 255;
+  }
+  return out;
+}
+
+// Cut off a rim of whatever is not the page.
+//
+// A corner a little outside the sheet drags a sliver of desk, or of the sheet
+// underneath, along the edge of the straightened page, and it reads as a dirty
+// border. Finding the sheet's edge exactly is not always possible - a page
+// lying on more white paper barely has a visible one - but a dark rim on the
+// finished rectangle is obvious, and removing it needs no cleverness.
+//
+// Bounded hard, and judged on the flattened image: an unbounded trim would eat
+// the page, and a shadow across the real page would otherwise look like border.
+export function trimBorders(image, { maxFraction = 0.035 } = {}) {
+  const small = shrinkGray(luminance(image), 600);
+  const flat = flatten(small);
+  const { width, height } = small;
+
+  const middle = [];
+  for (let y = Math.round(height * 0.3); y < height * 0.7; y++) {
+    for (let x = Math.round(width * 0.3); x < width * 0.7; x += 2) middle.push(flat.data[y * width + x]);
+  }
+  if (middle.length < 50) return image;
+  middle.sort((a, b) => a - b);
+  const pageLevel = middle[middle.length >> 1];
+  const spread = middle[Math.floor(middle.length * 0.84)] - middle[Math.floor(middle.length * 0.16)];
+  const off = pageLevel - Math.max(18, spread * 1.6);
+
+  // A line counts as border when much of it is not page.
+  const lineIsBorder = (get, length) => {
+    let bad = 0;
+    let seen = 0;
+    for (let i = Math.round(length * 0.08); i < length * 0.92; i += 2) {
+      if (get(i) < off) bad++;
+      seen++;
+    }
+    return seen > 0 && bad / seen > 0.35;
+  };
+
+  const limitY = Math.round(height * maxFraction);
+  const limitX = Math.round(width * maxFraction);
+  let top = 0;
+  let bottom = 0;
+  let left = 0;
+  let right = 0;
+  while (top < limitY && lineIsBorder((x) => flat.data[top * width + x], width)) top++;
+  while (bottom < limitY && lineIsBorder((x) => flat.data[(height - 1 - bottom) * width + x], width)) bottom++;
+  while (left < limitX && lineIsBorder((y) => flat.data[y * width + left], height)) left++;
+  while (right < limitX && lineIsBorder((y) => flat.data[y * width + (width - 1 - right)], height)) right++;
+  if (!(top || bottom || left || right)) return image;
+
+  // Back to the straightened page's own pixels, with a pixel to spare.
+  const sx = image.width / width;
+  const sy = image.height / height;
+  const x0 = Math.min(image.width - 8, Math.round(left * sx) + 1);
+  const y0 = Math.min(image.height - 8, Math.round(top * sy) + 1);
+  const x1 = Math.max(x0 + 8, image.width - Math.round(right * sx) - 1);
+  const y1 = Math.max(y0 + 8, image.height - Math.round(bottom * sy) - 1);
+
+  const out = { data: new Uint8ClampedArray((x1 - x0) * (y1 - y0) * 4), width: x1 - x0, height: y1 - y0 };
+  for (let y = y0; y < y1; y++) {
+    const from = (y * image.width + x0) * 4;
+    out.data.set(image.data.subarray(from, from + (x1 - x0) * 4), (y - y0) * (x1 - x0) * 4);
+  }
+  return out;
+}
+
 // --- the whole job ---------------------------------------------------------
 
 // corners: pass what detectPage found, or what the person dragged to. Pass
@@ -1169,5 +1332,11 @@ export function cleanPage(image, corners = null, { maxEdge = MAX_LONG_EDGE, tone
   const straightened = corners
     ? warpPerspective(image, corners, outputSize(corners, maxEdge)) ?? image
     : image;
-  return enhance(straightened, TONES[tone] ?? TONES.normal);
+  // Only when the corners were given: with no crop there is no rim to cut.
+  const trimmed = corners ? trimBorders(straightened) : straightened;
+  const settings = TONES[tone] ?? TONES.normal;
+  const cleaned = enhance(trimmed, settings);
+  // Only when the page was cropped: an uncropped frame has no border to clear,
+  // and whatever is at its edge is the picture itself.
+  return corners ? clearBorderStains(cleaned, { paper: settings.paper }) : cleaned;
 }
