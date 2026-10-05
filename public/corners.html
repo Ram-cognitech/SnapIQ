@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Corners</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#14161a; --muted:#5d636e; --line:#e3e6ea; --accent:#3b5bdb; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { --bg:#14161a; --card:#1c1f25; --ink:#f2f4f7; --muted:#99a0ad; --line:#2b2f37; --accent:#8aa2ff; }
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; background:var(--bg); color:var(--ink); padding:16px;
+    font:16px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width:900px; margin:0 auto; }
+  h1 { font-size:1.2rem; margin:0 0 4px; }
+  p { color:var(--muted); margin:0 0 16px; font-size:.92rem; }
+  canvas { width:100%; border:1px solid var(--line); border-radius:12px; display:block; touch-action:none; cursor:crosshair; background:var(--card); }
+  .out {
+    margin-top:14px; background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px;
+    font-family:ui-monospace, "Cascadia Mono", Menlo, monospace; font-size:.85rem; word-break:break-all; user-select:all;
+  }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:12px; }
+  button, label.file {
+    font:inherit; font-weight:600; border:1px solid var(--line); background:var(--card); color:var(--ink);
+    border-radius:10px; padding:9px 14px; cursor:pointer;
+  }
+  button.primary { background:var(--accent); color:#fff; border-color:transparent; }
+  .step { font-weight:600; color:var(--accent); }
+  input[type=file] { display:none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Where are the corners?</h1>
+  <p>
+    Open a photo, then click its four corners — <strong>top-left, top-right, bottom-right,
+    bottom-left</strong>, in that order. Copy the line at the bottom and send it to me. It lets
+    the straightening and the shadow removal be judged on their own, without a miss by the
+    corner-finder hiding what they did.
+  </p>
+
+  <div class="row">
+    <label class="file">Open a photo<input id="file" type="file" accept="image/*"></label>
+    <button id="undo">Undo last</button>
+    <button id="clear">Start again</button>
+    <span class="step" id="step">Open a photo to begin</span>
+  </div>
+
+  <canvas id="canvas" style="margin-top:14px"></canvas>
+  <div class="out" id="out">—</div>
+</main>
+
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const NAMES = ['top-left', 'top-right', 'bottom-right', 'bottom-left'];
+const COLOURS = ['#e03131', '#2f9e44', '#1971c2', '#f08c00'];
+
+let image = null;      // the decoded photo
+let name = 'photo.jpg';
+let points = [];       // in the photo's own pixels
+let scale = 1;
+
+$('file').onchange = async (event) => {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  name = file.name;
+  image = await createImageBitmap(file);
+  points = [];
+  draw();
+};
+
+function draw() {
+  const canvas = $('canvas');
+  if (!image) return;
+  const room = Math.min(window.innerWidth - 32, 900);
+  scale = room / image.width;
+  canvas.width = Math.round(image.width * scale);
+  canvas.height = Math.round(image.height * scale);
+
+  const context = canvas.getContext('2d');
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+  if (points.length > 1) {
+    context.beginPath();
+    points.forEach(([x, y], i) => (i ? context.lineTo(x * scale, y * scale) : context.moveTo(x * scale, y * scale)));
+    if (points.length === 4) context.closePath();
+    context.strokeStyle = '#d0bfff';
+    context.lineWidth = 2;
+    context.stroke();
+  }
+  points.forEach(([x, y], i) => {
+    context.beginPath();
+    context.arc(x * scale, y * scale, 8, 0, Math.PI * 2);
+    context.fillStyle = COLOURS[i];
+    context.fill();
+    context.strokeStyle = '#fff';
+    context.lineWidth = 2;
+    context.stroke();
+  });
+
+  $('step').textContent = points.length < 4
+    ? `Click the ${NAMES[points.length]} corner`
+    : 'Done — copy the line below';
+
+  $('out').textContent = points.length === 4
+    ? `node scripts/try.mjs tmp/${name.replace(/\.[^.]+$/, '')}.jpg tmp --corners `
+      + points.map(([x, y]) => `${Math.round(x)},${Math.round(y)}`).join(' ')
+    : points.length
+      ? points.map(([x, y], i) => `${NAMES[i]}: ${Math.round(x)},${Math.round(y)}`).join('   ')
+      : '—';
+}
+
+$('canvas').addEventListener('pointerdown', (event) => {
+  if (!image || points.length >= 4) return;
+  const box = event.currentTarget.getBoundingClientRect();
+  points.push([
+    Math.max(0, Math.min(image.width - 1, (event.clientX - box.left) / scale)),
+    Math.max(0, Math.min(image.height - 1, (event.clientY - box.top) / scale)),
+  ]);
+  draw();
+});
+
+$('undo').onclick = () => { points.pop(); draw(); };
+$('clear').onclick = () => { points = []; draw(); };
+window.addEventListener('resize', draw);
+</script>
+</body>
+</html>
