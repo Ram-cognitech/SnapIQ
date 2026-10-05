@@ -104,40 +104,49 @@ export function otsu({ data }) {
 // The four corners of the page, in full-resolution coordinates, or null when
 // nothing page-shaped is there - in which case the whole frame is used, which
 // is the honest outcome rather than a confident wrong crop.
-export function detectPage(image, { minAreaFraction = 0.15 } = {}) {
-  const full = luminance(image);
-  const small = shrinkGray(full, 320);
+export function detectPage(image, { minAreaFraction = 0.12, minScore = 0.08 } = {}) {
+  const small = shrinkGray(luminance(image), 500);
   const { data, width, height } = small;
   const step = small.step ?? 1;
 
   const threshold = otsu(small);
   if (threshold < 0) return null;          // one flat tone: there is no page here
-  // The page is the brighter group. Anything at or below the threshold is the
-  // world around it.
+
+  // The page is in the brighter group - but so is every other pale thing in
+  // the room, and they touch, which is why what follows is not simply "take
+  // the biggest".
   const bright = new Uint8Array(width * height);
   for (let i = 0; i < data.length; i++) bright[i] = data[i] > threshold ? 1 : 0;
 
-  const component = largestComponent(bright, width, height);
-  if (!component) return null;
-  if (component.size < width * height * minAreaFraction) return null;
-
-  // Corners by extremes of the two diagonals: the top-left of a quadrilateral
-  // is its smallest x+y, the top-right its largest x-y, and so on. Cheap, and
-  // steady as long as the page is not rotated past 45 degrees - which nobody
-  // does when photographing a document.
-  let tl = null, tr = null, br = null, bl = null;
-  let minSum = Infinity, maxSum = -Infinity, minDiff = Infinity, maxDiff = -Infinity;
-  for (const index of component.pixels) {
+  const gradient = sobel(small);
+  const toPoints = (pixels) => pixels.map((index) => {
     const x = index % width;
-    const y = (index - x) / width;
-    const sum = x + y;
-    const diff = x - y;
-    if (sum < minSum) { minSum = sum; tl = [x, y]; }
-    if (sum > maxSum) { maxSum = sum; br = [x, y]; }
-    if (diff > maxDiff) { maxDiff = diff; tr = [x, y]; }
-    if (diff < minDiff) { minDiff = diff; bl = [x, y]; }
+    return [x, (index - x) / width];
+  });
+
+  // Several degrees of shrinking, because the right one depends on how wide
+  // the join is between the page and whatever pale thing it is lying on. At
+  // zero, a page alone on a desk is found immediately; further in, a page
+  // resting on another page finally comes apart from it. Every candidate is
+  // grown back and judged on its merits, so nothing rests on picking the
+  // erosion correctly.
+  let best = null;
+  for (const erosion of [0, 2, 4, 7]) {
+    const seeds = erosion ? erodeMask(bright, width, height, erosion) : bright;
+    for (const piece of componentsOf(seeds, width, height, 3)) {
+      const pixels = erosion ? regrow(piece, bright, width, height, erosion) : piece;
+      if (pixels.length < width * height * minAreaFraction) continue;
+      const quad = maxAreaQuad(convexHull(toPoints(pixels)));
+      if (!quad) continue;
+      const score = scoreQuad(quad, pixels.length, gradient, width, height);
+      if (!best || score > best.score) best = { score, quad };
+    }
   }
-  if (!tl || !tr || !br || !bl) return null;
+
+  // Nothing page-shaped with real edges under it. Saying so is the honest
+  // answer; the capture page then offers the whole frame and the corners can
+  // be dragged.
+  if (!best || best.score < minScore) return null;
 
   // Back to the photograph's own coordinates, and nudged to the middle of the
   // block each shrunken pixel stood for.
@@ -145,13 +154,216 @@ export function detectPage(image, { minAreaFraction = 0.15 } = {}) {
     Math.min(image.width - 1, Math.round((x + 0.5) * step)),
     Math.min(image.height - 1, Math.round((y + 0.5) * step)),
   ];
-  const corners = [back(tl), back(tr), back(br), back(bl)];
+  return orderCorners(best.quad).map(back);
+}
 
-  // A quadrilateral that is nearly the whole frame means no page was found,
-  // only the photo's own edges; and a sliver means something went wrong.
-  const area = polygonArea(corners);
-  if (area < image.width * image.height * minAreaFraction) return null;
-  return corners;
+// --- 1b. the pieces the detector is built from -----------------------------
+
+// Gradient strength, which is what tells a real page edge from a line drawn
+// across paper. Brightness alone cannot: a page lying on another page is one
+// bright region, and any boundary we invent inside it has no edge under it.
+export function sobel({ data, width, height }) {
+  const out = new Uint8ClampedArray(width * height);
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const i = y * width + x;
+      const gx =
+        -data[i - width - 1] + data[i - width + 1]
+        - 2 * data[i - 1] + 2 * data[i + 1]
+        - data[i + width - 1] + data[i + width + 1];
+      const gy =
+        -data[i - width - 1] - 2 * data[i - width] - data[i - width + 1]
+        + data[i + width - 1] + 2 * data[i + width] + data[i + width + 1];
+      out[i] = Math.min(255, Math.hypot(gx, gy) >> 2);
+    }
+  }
+  return { data: out, width, height };
+}
+
+// Shrink a mask inwards. Two bright things that touch along a thin join come
+// apart here, which is the only way to consider them separately - a page lying
+// on another page is otherwise a single region for ever.
+export function erodeMask(mask, width, height, radius) {
+  let current = mask;
+  for (let step = 0; step < radius; step++) {
+    const next = new Uint8Array(current.length);
+    for (let y = 1; y < height - 1; y++) {
+      for (let x = 1; x < width - 1; x++) {
+        const i = y * width + x;
+        next[i] = current[i] && current[i - 1] && current[i + 1]
+          && current[i - width] && current[i + width] ? 1 : 0;
+      }
+    }
+    current = next;
+  }
+  return current;
+}
+
+// Grow a shrunken piece back by exactly as much as was taken off it, staying
+// inside the original bright region.
+//
+// It must be *bounded*. Flooding the whole region instead - which is what the
+// first attempt did - restores the entire connected component by definition,
+// re-joining the very things the erosion had just separated, so every erosion
+// depth returned an identical answer.
+function regrow(seed, full, width, height, steps) {
+  let current = new Uint8Array(full.length);
+  for (const index of seed) current[index] = 1;
+
+  for (let step = 0; step < steps; step++) {
+    const next = new Uint8Array(full.length);
+    for (let y = 1; y < height - 1; y++) {
+      for (let x = 1; x < width - 1; x++) {
+        const i = y * width + x;
+        if (!full[i]) continue;
+        next[i] = current[i] || current[i - 1] || current[i + 1]
+          || current[i - width] || current[i + width] ? 1 : 0;
+      }
+    }
+    current = next;
+  }
+
+  const pixels = [];
+  for (let i = 0; i < current.length; i++) if (current[i]) pixels.push(i);
+  return pixels;
+}
+
+// Every connected piece, biggest first.
+function componentsOf(mask, width, height, keep = 4) {
+  const seen = new Uint8Array(mask.length);
+  const queue = new Int32Array(mask.length);
+  const found = [];
+  for (let start = 0; start < mask.length; start++) {
+    if (!mask[start] || seen[start]) continue;
+    let head = 0;
+    let tail = 0;
+    queue[tail++] = start;
+    seen[start] = 1;
+    const pixels = [];
+    while (head < tail) {
+      const index = queue[head++];
+      pixels.push(index);
+      const x = index % width;
+      const y = (index - x) / width;
+      const push = (next) => { if (mask[next] && !seen[next]) { seen[next] = 1; queue[tail++] = next; } };
+      if (x > 0) push(index - 1);
+      if (x < width - 1) push(index + 1);
+      if (y > 0) push(index - width);
+      if (y < height - 1) push(index + width);
+    }
+    found.push(pixels);
+  }
+  return found.sort((a, b) => b.length - a.length).slice(0, keep);
+}
+
+// The outline of a set of points, by Andrew's monotone chain.
+export function convexHull(points) {
+  if (points.length < 4) return points.slice();
+  const sorted = [...points].sort((a, b) => (a[0] - b[0]) || (a[1] - b[1]));
+  const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const half = (list) => {
+    const out = [];
+    for (const point of list) {
+      while (out.length >= 2 && cross(out[out.length - 2], out[out.length - 1], point) <= 0) out.pop();
+      out.push(point);
+    }
+    out.pop();
+    return out;
+  };
+  return [...half(sorted), ...half(sorted.reverse())];
+}
+
+// The biggest four-cornered shape inside that outline. A page photographed at
+// an angle is a quadrilateral, so this is the shape being looked for - and it
+// is far steadier than reading the extremes of the two diagonals, which is
+// what the first version did and which any ragged edge could pull about.
+export function maxAreaQuad(hull) {
+  const n = hull.length;
+  if (n < 4) return null;
+  if (n === 4) return hull.slice();
+
+  const triangle = (a, b, c) =>
+    Math.abs((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])) / 2;
+
+  let best = null;
+  let bestArea = 0;
+  for (let i = 0; i < n; i++) {
+    for (let k = i + 2; k < n; k++) {
+      // The diagonal i-k, then the furthest point on each side of it.
+      let j = -1;
+      let jArea = 0;
+      for (let m = i + 1; m < k; m++) {
+        const area = triangle(hull[i], hull[m], hull[k]);
+        if (area > jArea) { jArea = area; j = m; }
+      }
+      let l = -1;
+      let lArea = 0;
+      for (let m = k + 1; m < n + i; m++) {
+        const area = triangle(hull[k], hull[m % n], hull[i]);
+        if (area > lArea) { lArea = area; l = m % n; }
+      }
+      if (j < 0 || l < 0) continue;
+      if (jArea + lArea > bestArea) {
+        bestArea = jArea + lArea;
+        best = [hull[i], hull[j], hull[k], hull[l]];
+      }
+    }
+  }
+  return best;
+}
+
+// Clockwise from the top-left, which is the order everything downstream wants.
+export function orderCorners(quad) {
+  const cx = quad.reduce((total, [x]) => total + x, 0) / quad.length;
+  const cy = quad.reduce((total, [, y]) => total + y, 0) / quad.length;
+  const byAngle = [...quad].sort((a, b) =>
+    Math.atan2(a[1] - cy, a[0] - cx) - Math.atan2(b[1] - cy, b[0] - cx));
+  let first = 0;
+  let bestSum = Infinity;
+  byAngle.forEach(([x, y], index) => {
+    if (x + y < bestSum) { bestSum = x + y; first = index; }
+  });
+  return [0, 1, 2, 3].map((offset) => byAngle[(first + offset) % 4]);
+}
+
+// How much this quadrilateral looks like a page: its sides should sit on real
+// edges, it should be filled by the bright region it came from, and it should
+// not be a sliver. The edge term is what rejects a boundary drawn across the
+// middle of a sheet of paper, where there is nothing to see.
+function scoreQuad(quad, pixelCount, gradient, width, height) {
+  const area = polygonArea(quad);
+  if (area < width * height * 0.1) return 0;
+
+  let support = 0;
+  let samples = 0;
+  for (let side = 0; side < 4; side++) {
+    const [x1, y1] = quad[side];
+    const [x2, y2] = quad[(side + 1) % 4];
+    const steps = Math.max(8, Math.round(Math.hypot(x2 - x1, y2 - y1)));
+    for (let s = 0; s <= steps; s++) {
+      const x = Math.round(x1 + ((x2 - x1) * s) / steps);
+      const y = Math.round(y1 + ((y2 - y1) * s) / steps);
+      if (x < 1 || y < 1 || x >= width - 1 || y >= height - 1) { samples++; continue; }
+      // The strongest gradient within a pixel or two of the line, so a corner
+      // that is a little out does not score zero.
+      let strongest = 0;
+      for (let dy = -2; dy <= 2; dy++) {
+        for (let dx = -2; dx <= 2; dx++) {
+          const gx = x + dx;
+          const gy = y + dy;
+          if (gx < 0 || gy < 0 || gx >= width || gy >= height) continue;
+          const value = gradient.data[gy * width + gx];
+          if (value > strongest) strongest = value;
+        }
+      }
+      support += strongest;
+      samples++;
+    }
+  }
+  const edge = samples ? support / samples / 255 : 0;
+  const fill = Math.min(1, pixelCount / area);        // an L-shape fills its quad badly
+  const shape = Math.min(area / (width * height), 0.95);
+  return edge * fill * fill * Math.sqrt(shape);
 }
 
 function largestComponent(mask, width, height) {
