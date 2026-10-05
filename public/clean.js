@@ -425,6 +425,268 @@ export function outputSize([tl, tr, br, bl], maxEdge = MAX_LONG_EDGE) {
   return { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) };
 }
 
+// --- 1c. putting the corners exactly on the page ---------------------------
+
+// Move four roughly-right corners onto the page's actual edges.
+//
+// Not by nudging each corner towards whatever gradient is nearest it: at the
+// corner of a spiral notebook the pages below are also an edge, and a local
+// search walks onto them. Instead each of the four sides is fitted as a line,
+// using samples taken along its middle where the edge is clean and far from
+// the clutter at the ends, and the corners are where consecutive lines meet.
+//
+// So every corner is decided by two edges and some hundreds of pixels rather
+// than by its own neighbourhood. A corner that was badly out is pulled back by
+// evidence that was never near it - which is exactly the case that needs help,
+// since the lower-right of a bound notebook is where a model is least sure.
+export function refineCorners(image, quad, {
+  working = 700,       // resolution the search runs at
+  reach = 0.02,        // how far to look for the edge, as a share of the long side
+  samples = 48,
+  trim = 0.15,         // ignore this much of each end, where corners confuse things
+  maxShift = 0.04,     // a corner that wants to move further than this is not believed
+} = {}) {
+  const small = shrinkGray(luminance(image), working);
+  const step = small.step ?? 1;
+  const gradient = sobel(small);
+  const span = Math.max(4, Math.round(Math.max(small.width, small.height) * reach));
+  const limit = Math.max(8, Math.round(Math.max(image.width, image.height) * maxShift));
+
+  // Judge "is this still the page?" on the flattened image, not the raw one.
+  // A page under a hard shadow is two very different brightnesses but one
+  // uniform sheet; dividing by its own slow-changing lighting is what makes
+  // that uniformity visible, and it is already how the shadow is removed.
+  const flat = flatten(small);
+
+  const scaled = quad.map(([x, y]) => [x / step, y / step]);
+
+  // What the page looks like, measured from well inside it so no edge, no
+  // shadow boundary and nothing beyond the page can colour the answer.
+  const centreX = scaled.reduce((t, [x]) => t + x, 0) / 4;
+  const centreY = scaled.reduce((t, [, y]) => t + y, 0) / 4;
+  const inside = [];
+  for (let gy = 0; gy < 12; gy++) {
+    for (let gx = 0; gx < 12; gx++) {
+      // A grid over the quad pulled a quarter of the way to its middle.
+      const u = (gx + 0.5) / 12;
+      const v = (gy + 0.5) / 12;
+      const top = [scaled[0][0] + (scaled[1][0] - scaled[0][0]) * u, scaled[0][1] + (scaled[1][1] - scaled[0][1]) * u];
+      const bottom = [scaled[3][0] + (scaled[2][0] - scaled[3][0]) * u, scaled[3][1] + (scaled[2][1] - scaled[3][1]) * u];
+      let x = top[0] + (bottom[0] - top[0]) * v;
+      let y = top[1] + (bottom[1] - top[1]) * v;
+      x = centreX + (x - centreX) * 0.75;
+      y = centreY + (y - centreY) * 0.75;
+      const px = Math.round(x);
+      const py = Math.round(y);
+      if (px < 0 || py < 0 || px >= small.width || py >= small.height) continue;
+      inside.push(flat.data[py * small.width + px]);
+    }
+  }
+  if (inside.length < 24) return quad;
+  inside.sort((a, b) => a - b);
+  const pageLevel = inside[inside.length >> 1];
+  const spread = inside[Math.floor(inside.length * 0.84)] - inside[Math.floor(inside.length * 0.16)];
+  // Off the page when it is darker than the sheet by more than its own
+  // variation - with a floor, so a very even page does not trip on nothing.
+  const offPage = pageLevel - Math.max(14, spread * 1.6);
+
+  const lines = [];
+
+  for (let side = 0; side < 4; side++) {
+    const [x1, y1] = scaled[side];
+    const [x2, y2] = scaled[(side + 1) % 4];
+    const length = Math.hypot(x2 - x1, y2 - y1);
+    if (length < 8) return quad;
+    const dx = (x2 - x1) / length;
+    const dy = (y2 - y1) / length;
+    const nx = -dy;                       // the direction to search in
+    const ny = dx;
+
+    const found = [];
+    for (let s = 0; s < samples; s++) {
+      const along = trim + ((1 - 2 * trim) * s) / (samples - 1);
+      const bx = x1 + dx * length * along;
+      const by = y1 + dy * length * along;
+
+      // Walk outwards from inside the sheet and stop where it stops being the
+      // sheet. Taking the strongest gradient in the neighbourhood instead
+      // makes the line hop onto a different edge altogether: under a bound
+      // notebook, the stack of pages below is a stronger edge than the page,
+      // and the bottom corners march a hundred pixels down onto it. Leaving
+      // the page can only happen once, so the first departure is the edge.
+      const sample = (offset) => {
+        const px = Math.round(bx + nx * offset);
+        const py = Math.round(by + ny * offset);
+        if (px < 1 || py < 1 || px >= small.width - 1 || py >= small.height - 1) return null;
+        return flat.data[py * small.width + px];
+      };
+
+      let at = null;
+      let leaving = 0;
+      for (let offset = Math.round(span * 0.75); offset >= -span; offset--) {
+        const value = sample(offset);
+        if (value === null) continue;
+        if (value < offPage) {
+          // Two in a row, so a speck of dust or a letter is not an edge.
+          if (++leaving >= 2) { at = offset + 1; break; }
+        } else {
+          leaving = 0;
+        }
+      }
+      if (at === null) continue;
+
+      // The gradient decides the last pixel or two, where it is reliable
+      // because we already know the edge is here.
+      let bestAt = at;
+      let bestEdge = -1;
+      for (let offset = at - 2; offset <= at + 2; offset++) {
+        const px = Math.round(bx + nx * offset);
+        const py = Math.round(by + ny * offset);
+        if (px < 1 || py < 1 || px >= small.width - 1 || py >= small.height - 1) continue;
+        const value = gradient.data[py * small.width + px];
+        if (value > bestEdge) { bestEdge = value; bestAt = offset; }
+      }
+      found.push({ x: bx + nx * bestAt, y: by + ny * bestAt, weight: Math.max(1, bestEdge) });
+    }
+    // Keep the fitted line only if it actually lies on more edge than the one
+    // it replaces. A side is a real boundary or it is not, and the gradient
+    // says which: a line that has drifted onto blank paper, or onto the wrong
+    // edge entirely, sits on less of it and is refused here rather than
+    // allowed to drag two corners with it.
+    const was = lineThrough(scaled[side], scaled[(side + 1) % 4]);
+    const fitted = fitLine(found);
+    lines.push(
+      fitted && supportFor(fitted, scaled[side], scaled[(side + 1) % 4], gradient, small)
+        >= supportFor(was, scaled[side], scaled[(side + 1) % 4], gradient, small)
+        ? fitted
+        : was
+    );
+  }
+
+  const refined = [];
+  for (let corner = 0; corner < 4; corner++) {
+    // Corner n is where the side ending at it meets the side leaving it.
+    const meeting = intersect(lines[(corner + 3) % 4], lines[corner]);
+    if (!meeting) return quad;
+    const x = Math.round(meeting[0] * step);
+    const y = Math.round(meeting[1] * step);
+    const moved = Math.hypot(x - quad[corner][0], y - quad[corner][1]);
+    // A refinement that wants to move a corner a long way has found something
+    // else, not the page. Keep what we had.
+    refined.push(moved > limit ? quad[corner] : [
+      Math.max(0, Math.min(image.width - 1, x)),
+      Math.max(0, Math.min(image.height - 1, y)),
+    ]);
+  }
+  return refined;
+}
+
+// How much real edge a line sits on, over the stretch the side covers.
+// Projecting the two ends onto the line keeps the comparison honest: both
+// candidates are measured along the same part of the page.
+function supportFor(line, from, to, gradient, small) {
+  const [a, b, c] = line;
+  const project = ([x, y]) => {
+    const away = a * x + b * y - c;
+    return [x - a * away, y - b * away];
+  };
+  const [x1, y1] = project(from);
+  const [x2, y2] = project(to);
+  const steps = Math.max(12, Math.round(Math.hypot(x2 - x1, y2 - y1)));
+
+  let total = 0;
+  let counted = 0;
+  for (let s = 0; s <= steps; s++) {
+    const x = Math.round(x1 + ((x2 - x1) * s) / steps);
+    const y = Math.round(y1 + ((y2 - y1) * s) / steps);
+    if (x < 1 || y < 1 || x >= small.width - 1 || y >= small.height - 1) { counted++; continue; }
+    let strongest = 0;
+    for (let d = -1; d <= 1; d++) {
+      for (let e = -1; e <= 1; e++) {
+        const value = gradient.data[(y + d) * small.width + (x + e)];
+        if (value > strongest) strongest = value;
+      }
+    }
+    total += strongest;
+    counted++;
+  }
+  return counted ? total / counted : 0;
+}
+
+// Divide a grey plane by its own slow-changing brightness, so a sheet lit
+// unevenly - or with a hand's shadow across it - reads as one even tone. The
+// same closing used to take the shadow off a finished page (see `enhance`).
+function flatten(small) {
+  const span = Math.max(4, Math.round(Math.max(small.width, small.height) * 0.06));
+  const background = boxBlur(closing(small, span), 2);
+  const out = new Uint8ClampedArray(small.data.length);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = (small.data[i] / Math.max(16, background.data[i])) * 200;
+  }
+  return { data: out, width: small.width, height: small.height };
+}
+
+// A line as (a, b, c) with ax + by = c and (a, b) a unit normal, fitted by
+// total least squares so a vertical edge is no harder than a horizontal one.
+// Run twice, dropping the points that disagree most with the first pass: on a
+// page edge those are the ones that caught something else.
+function fitLine(points) {
+  if (points.length < 6) return null;
+  let working = points;
+  let line = null;
+
+  for (let pass = 0; pass < 2; pass++) {
+    let weight = 0;
+    let mx = 0;
+    let my = 0;
+    for (const p of working) { weight += p.weight; mx += p.x * p.weight; my += p.y * p.weight; }
+    if (!weight) return null;
+    mx /= weight;
+    my /= weight;
+
+    let sxx = 0;
+    let sxy = 0;
+    let syy = 0;
+    for (const p of working) {
+      const dx = p.x - mx;
+      const dy = p.y - my;
+      sxx += p.weight * dx * dx;
+      sxy += p.weight * dx * dy;
+      syy += p.weight * dy * dy;
+    }
+    // The smaller eigenvector of the scatter matrix is the normal.
+    const theta = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+    const a = -Math.sin(theta);
+    const b = Math.cos(theta);
+    line = [a, b, a * mx + b * my];
+
+    if (pass === 0) {
+      const distances = working.map((p) => Math.abs(a * p.x + b * p.y - line[2]));
+      const sorted = [...distances].sort((u, v) => u - v);
+      const median = sorted[sorted.length >> 1];
+      const keep = working.filter((_, i) => distances[i] <= Math.max(1.5, median * 2.5));
+      if (keep.length >= 6) working = keep;
+    }
+  }
+  return line;
+}
+
+const lineThrough = ([x1, y1], [x2, y2]) => {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const length = Math.hypot(dx, dy) || 1;
+  const a = -dy / length;
+  const b = dx / length;
+  return [a, b, a * x1 + b * y1];
+};
+
+function intersect([a1, b1, c1], [a2, b2, c2]) {
+  const determinant = a1 * b2 - a2 * b1;
+  // Two sides that have ended up parallel meet nowhere useful.
+  if (Math.abs(determinant) < 1e-6) return null;
+  return [(c1 * b2 - c2 * b1) / determinant, (a1 * c2 - a2 * c1) / determinant];
+}
+
 // --- 2. straighten ---------------------------------------------------------
 
 // The 3x3 projective transform taking the unit output rectangle's corners onto

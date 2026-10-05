@@ -11,7 +11,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   autoContrast, closing, detectPage, enhance, homography, localMax, luminance, otsu, outputSize,
-  pickPunch, softCurve, TONES,
+  pickPunch, refineCorners, softCurve, TONES,
   polygonArea, removeShadow, warpPerspective, cleanPage,
 } from '../../public/clean.js';
 
@@ -487,5 +487,83 @@ describe('flattening the paper without touching the writing', () => {
     const plain = enhance(page, { denoise: false, sharpen: 0 });
     expect(plain.width).toBe(page.width);
     expect(plain.height).toBe(page.height);
+  });
+});
+
+describe('putting roughly-right corners onto the page', () => {
+  // A bright sheet on a dark surface, photographed square.
+  const sheet = (width = 400, height = 520, inset = 40) => {
+    const data = new Uint8ClampedArray(width * height * 4);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const onPage = x >= inset && x < width - inset && y >= inset && y < height - inset;
+        const writing = onPage && y % 30 < 3 && x > inset + 20 && x < width - inset - 20;
+        const value = onPage ? (writing ? 70 : 225) : 35;
+        const i = (y * width + x) * 4;
+        data[i] = data[i + 1] = data[i + 2] = value;
+        data[i + 3] = 255;
+      }
+    }
+    return { data, width, height, truth: [[inset, inset], [width - 1 - inset, inset], [width - 1 - inset, height - 1 - inset], [inset, height - 1 - inset]] };
+  };
+
+  const away = (quad, truth) =>
+    quad.reduce((total, c, i) => total + Math.hypot(c[0] - truth[i][0], c[1] - truth[i][1]), 0) / 4;
+
+  it('pulls corners that are off back onto the edges', () => {
+    const page = sheet();
+    const off = page.truth.map(([x, y], i) => [x + [5, -6, -4, 6][i], y + [6, 5, -5, -6][i]]);
+    const before = away(off, page.truth);
+    const after = away(refineCorners(page, off), page.truth);
+    expect(before).toBeGreaterThan(5);
+    expect(after).toBeLessThan(before);
+    expect(after).toBeLessThan(3);
+  });
+
+  it('leaves corners alone when they are already right', () => {
+    const page = sheet();
+    expect(away(refineCorners(page, page.truth), page.truth)).toBeLessThan(5);
+  });
+
+  it('leaves a corner alone when the edge is further off than it looks for', () => {
+    // The search only reaches so far. Beyond that the honest answer is to keep
+    // what it was given rather than to fit whatever happens to be in range.
+    const page = sheet();
+    const farOff = page.truth.map(([x, y]) => [x + 40, y + 40]);
+    const refined = refineCorners(page, farOff, { reach: 0.01 });
+    expect(away(refined, page.truth)).toBeGreaterThan(20);
+  });
+
+  it('refuses a correction that wants to move a corner a long way', () => {
+    // Nothing page-like near this quad: the answer must be the quad itself
+    // rather than whatever the search wandered onto.
+    const page = sheet();
+    const nonsense = [[5, 5], [60, 5], [60, 60], [5, 60]];
+    expect(refineCorners(page, nonsense)).toEqual(nonsense);
+  });
+
+  it('stops at the edge of the sheet, not at a stronger edge beyond it', () => {
+    // A dark band outside the page, stronger than the page's own boundary -
+    // the case that walked the corners of a bound notebook onto the stack
+    // of pages below it.
+    const width = 400;
+    const height = 520;
+    const inset = 60;
+    const data = new Uint8ClampedArray(width * height * 4);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const onPage = x >= inset && x < width - inset && y >= inset && y < height - inset;
+        const band = !onPage && x >= inset - 25 && x < width - inset + 25 && y >= inset - 25 && y < height - inset + 25;
+        const value = onPage ? 220 : band ? 120 : 0;    // page, grey rim, then black
+        const i = (y * width + x) * 4;
+        data[i] = data[i + 1] = data[i + 2] = value;
+        data[i + 3] = 255;
+      }
+    }
+    const truth = [[inset, inset], [width - 1 - inset, inset], [width - 1 - inset, height - 1 - inset], [inset, height - 1 - inset]];
+    const off = truth.map(([x, y], i) => [x + [6, -6, -6, 6][i], y + [6, 6, -6, -6][i]]);
+    const refined = refineCorners({ data, width, height }, off);
+    // Within a few pixels of the page, not 25 out on the rim's outer edge.
+    expect(away(refined, truth)).toBeLessThan(8);
   });
 });
